@@ -1,4 +1,4 @@
-"""百家号会话。扫码登录交给官方网页，Cookie 仅保留在内存中。"""
+"""百家号会话。网页登录交给官方网页，Cookie 仅保留在内存中。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class BaijiaAuthError(BaijiaAPIError):
 
 
 class BaijiaLoginTimeout(BaijiaAuthError):
-    """等待用户完成官方扫码登录超时。"""
+    """等待用户完成官方网页登录超时。"""
 
 
 class BaijiaParseError(BaijiaAPIError):
@@ -62,7 +62,7 @@ def _visible_login_context():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        raise BaijiaAuthError("扫码登录需要安装 playwright：python -m pip install playwright") from None
+        raise BaijiaAuthError("浏览器登录需要安装 playwright：python -m pip install playwright") from None
 
     with sync_playwright() as playwright:
         try:
@@ -129,7 +129,7 @@ class BaijiaAuth:
         return cls(cookie=cookie, **kwargs)
 
     @classmethod
-    def from_qrcode_login(
+    def from_browser_login(
         cls,
         *,
         timeout: float = 300,
@@ -137,10 +137,10 @@ class BaijiaAuth:
         request_timeout: float = 20,
         session=None,
     ) -> "BaijiaAuth":
-        """显示百家号官方登录页，等待扫码并校验内存中的浏览器 Cookie。
+        """显示百家号官方登录页，等待用户完成登录并校验浏览器 Cookie。
 
-        使用独立的临时 Chrome 会话；用户在可见页面自行打开官方二维码并扫码。
-        不调用未核实的二维码协议，也不读写浏览器资料、storage_state 或 Cookie 文件。
+        使用独立的临时 Chrome 会话；用户在可见页面选择手机号或二维码登录。
+        不调用未核实的登录协议，不读取现有 Chrome 资料或保存 Cookie 文件。
         """
         if timeout <= 0 or poll_interval <= 0 or request_timeout <= 0:
             raise ValueError("timeout、poll_interval、request_timeout 必须大于 0")
@@ -154,13 +154,13 @@ class BaijiaAuth:
                 page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=min(timeout, 30) * 1000)
             except Exception:
                 raise BaijiaAuthError("无法打开百家号官方登录页；请检查网络后重试") from None
-            print("请在新打开的百家号页面点击登录/注册，使用百度 App 扫描官方二维码并确认。")
+            print("请在新打开的百家号页面点击登录/注册，选择手机号或官方二维码完成登录。")
             deadline = time.monotonic() + timeout
 
             while time.monotonic() < deadline:
                 try:
                     if page.is_closed():
-                        raise BaijiaAuthError("登录窗口已关闭，扫码登录未完成")
+                        raise BaijiaAuthError("登录窗口已关闭，网页登录未完成")
                     cookie_header = _cookie_header_for_appinfo(context)
                 except BaijiaAuthError:
                     raise
@@ -180,7 +180,7 @@ class BaijiaAuth:
                         candidate.close()
                     except Exception:
                         candidate.close()
-                        raise BaijiaAuthError("扫码后会话校验请求失败") from None
+                        raise BaijiaAuthError("网页登录会话校验请求失败") from None
                     else:
                         return candidate
 
@@ -190,11 +190,28 @@ class BaijiaAuth:
                 try:
                     page.wait_for_timeout(min(poll_interval, remaining) * 1000)
                 except Exception:
-                    raise BaijiaAuthError("登录窗口已关闭，扫码登录未完成") from None
+                    raise BaijiaAuthError("登录窗口已关闭，网页登录未完成") from None
 
         if last_error:
-            raise BaijiaAuthError(f"候选 Cookie 未通过会话校验，等待扫码超时：{last_error}")
-        raise BaijiaLoginTimeout("等待百家号官方二维码扫码登录超时")
+            raise BaijiaAuthError(f"候选 Cookie 未通过会话校验，等待登录超时：{last_error}")
+        raise BaijiaLoginTimeout("等待百家号官方网页登录超时")
+
+    @classmethod
+    def from_qrcode_login(
+        cls,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 2,
+        request_timeout: float = 20,
+        session=None,
+    ) -> "BaijiaAuth":
+        """兼容旧入口；二维码仍由百家号官方登录页展示。"""
+        return cls.from_browser_login(
+            timeout=timeout,
+            poll_interval=poll_interval,
+            request_timeout=request_timeout,
+            session=session,
+        )
 
     @classmethod
     def from_partner_token(cls, app_id: str, app_token: str, **kwargs) -> "BaijiaAuth":

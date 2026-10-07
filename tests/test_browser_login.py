@@ -1,4 +1,4 @@
-"""扫码辅助入口的离线契约；不会启动 Chrome 或读取真实 Cookie。"""
+"""官方浏览器登录入口的离线契约；不启动 Chrome 或读取真实 Cookie。"""
 
 import contextlib
 import io
@@ -55,7 +55,7 @@ class FakeResponse:
         self.errno = errno
 
     def json(self):
-        return {"errno": self.errno, "data": {"name": "本人"} if self.errno == 0 else None}
+        return {"errno": self.errno, "data": {"user": {"name": "本人"}} if self.errno == 0 else None}
 
 
 class FakeSession:
@@ -76,12 +76,12 @@ def fake_browser(context):
         context.exited = True
 
 
-class QrcodeLoginTests(unittest.TestCase):
-    def run_with_browser(self, context, clock, session, **kwargs):
+class BrowserLoginTests(unittest.TestCase):
+    def run_with_browser(self, context, clock, session, *, entry="from_browser_login", **kwargs):
         with patch("baijia_apis.auth._visible_login_context", lambda: fake_browser(context)), patch(
             "baijia_apis.auth.time.monotonic", clock.monotonic
         ), contextlib.redirect_stdout(io.StringIO()) as output:
-            auth = BaijiaAuth.from_qrcode_login(session=session, **kwargs)
+            auth = getattr(BaijiaAuth, entry)(session=session, **kwargs)
         return auth, output.getvalue()
 
     def test_success_uses_scoped_httponly_cookie_and_validates_session(self):
@@ -98,9 +98,18 @@ class QrcodeLoginTests(unittest.TestCase):
         self.assertEqual(session.calls[0][0:2], ("GET", APPINFO_URL))
         self.assertEqual(session.calls[0][2]["headers"]["Cookie"], "BAIDUID=a=b")
         self.assertNotIn("a=b", output)
-        self.assertIn("官方二维码", output)
+        self.assertIn("手机号或官方二维码", output)
 
-    def test_timeout_without_scanned_session_is_distinct(self):
+    def test_qrcode_entry_remains_compatible(self):
+        clock = FakeClock()
+        context = FakeContext(clock, [[{"name": "BAIDUID", "value": "legacy-session"}]])
+        session = FakeSession(0, 0)
+        auth, _ = self.run_with_browser(
+            context, clock, session, entry="from_qrcode_login", timeout=3,
+        )
+        self.assertEqual(auth.require_logged_in()["data"]["user"]["name"], "本人")
+
+    def test_timeout_without_login_cookie_is_distinct(self):
         clock = FakeClock()
         context = FakeContext(clock, [[]])
         session = FakeSession()

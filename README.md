@@ -1,183 +1,134 @@
-<div align="center">
-    <a href="https://www.python.org/">
-        <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python 3.10+">
-    </a>
-    <a href="https://github.com/psf/curl-cffi">
-        <img src="https://img.shields.io/badge/curl__cffi-latest-orange" alt="curl_cffi">
-    </a>
-</div>
+# BaijiaApis
 
-# 📰 Baidu Platform
+百家号内容读取与图文发布的 Python 接口。旧入口 `baidu_apis.BaiduApis` 保留，原有方法和返回结构不变。新代码把会话、内容、搜索和 Creator 写入分层。
 
-**✨ 专业的百度号数据采集解决方案，支持用户信息、发帖列表与作品互动数据抓取**
+## 能力状态
 
-当你需要让 AI Agent 感知百度内容生态——自动采集用户动态、分析内容数据、驱动内容运营策略——第一道墙往往不是模型能力，而是**平台数据获取能力的缺失**。
+| 能力 | 入口 | 状态与证据 |
+| --- | --- | --- |
+| Cookie 登录会话 | `BaijiaAuth.from_cookie()`、`login_state()` | `builder/app/appinfo` 无凭据 GET 已返回登录过期 JSON；有凭据会话未实测。扫码与短信登录协议未核实。 |
+| 作者资料、动态、互动数据 | `BaijiaContentAPI.get_user_info/get_user_posts/get_item_metrics` | 公开作者主页已匿名 GET 实测；动态和互动沿用旧仓库的 `mbd.baidu.com/webpage` JSONP 契约，新增解析和请求契约测试，尚未用有效账号回放。 |
+| 公开文章 Item | `BaijiaContentAPI.get_article()` | 已对公开 `baijiahao.baidu.com/s?id=...` 页面做匿名 GET 实测，解析标题、作者、更新时间与正文。HTML 结构变化可能需要更新解析器。 |
+| 指定作者内容搜索 | `BaijiaSearchAPI.search_user_posts()` | 逐页读取作者动态，按文字在本地筛选。依赖上述动态接口。 |
+| 全站文章搜索 | `BaijiaSearchAPI.search_articles()` | 使用百度网页搜索的 `site:` 条件。当前网络出口收到“百度安全验证”；解析只做了离线契约测试，未验证正常搜索页。它不是百家号站内私有 API。 |
+| 图文发布与状态查询 | `BaijiaCreatorAPI.publish_article/query_article_status` | 百家号 App ID / Token 开放接口路由可达，匿名 GET 返回参数错误；POST 请求格式来自公开实现，**未用具备权限的账号发布或查询**。 |
+| 本地图片上传 | `BaijiaCreatorAPI.upload_image()` | `pcui/picture/uploadproxy` 路由可达；表单字段依据公开 Creator 客户端源码，未做账号实测。也可直接向图文发布接口传已托管的 HTTPS 封面 URL。 |
+| 视频发布 | — | 未核实端点及上传链路，暂未实现。 |
 
-本项目做的事很简单：把这道墙拆掉。
+状态说明：“路由可达”只说明地址返回平台 JSON，不代表凭据、字段或发布结果已经实测。图文发布会创建作品，示例代码只展示调用方式，不会自动运行。
 
-**⚠️ 严禁用于爬取用户隐私、违规商业用途！本项目仅供学习与技术研究使用，后果自负。**
+## 项目结构
 
-## 🌟 功能特性
-
-- ✅ **用户信息采集** — 抓取百度号昵称、粉丝数、点赞数、发布总量等基础信息
-- ✅ **发帖列表采集** — 分页获取用户全部动态，支持翻页游标续爬
-- ✅ **作品互动数据采集** — 获取单条内容的点赞、评论、阅读、转发、收藏等指标
-- 🔐 **浏览器指纹模拟** — 基于 `curl_cffi` 模拟 Chrome 101 TLS 指纹，绕过基础风控
-- 🔍 **Cookie 有效性检测** — 批量验证 Cookie 存活状态
-
-## 🛠️ 快速开始
-
-### ⛳ 运行环境
-
-- Python 3.10+
-
-### 🎯 本地安装
-
-```bash
-pip install -r requirements.txt
+```text
+baijia_apis/
+├── auth.py       # Cookie / App Token 会话和登录状态
+├── content.py    # 作者动态、互动指标、公开 Item
+├── search.py     # 百度网页搜索、作者动态本地筛选
+└── creator.py    # 图文开放接口、Creator 图片上传
+baidu_apis.py     # 原有 BaiduApis 兼容入口
+tests/            # 离线请求契约测试
 ```
 
-### 🚀 运行 Demo
+## 安装与登录
 
-```bash
-python baidu_apis.py
+Python 3.10+：
+
+```powershell
+python -m pip install -r requirements.txt
 ```
 
-### 🎨 Cookie 配置
-
-在浏览器中打开 [author.baidu.com](https://author.baidu.com)，**登录账号**后按 `F12` 打开开发者工具，点击「网络」→ 找任意一个请求 → 复制请求头中的 `Cookie` 字段值。
-
-> ⚠️ 注意：Cookie 中必须包含 `Hmery-Time` 字段，否则请求将失败。
-
-将获取到的 Cookie 字符串作为 `cookies_str` 参数传入接口，格式如下：
-
-```
-BIDUPSID=xxx; Hmery-Time=xxx; BAIDUID=xxx; ...
-```
-
-## 📡 接口说明
-
-### `get_user_info(user_url, cookies_str)`
-
-获取百度号**用户基础信息**。
-
-**参数**
-
-| 参数            | 类型  | 说明                                                 |
-|---------------|-----|-----------------------------------------------------|
-| `user_url`    | str | 用户主页 URL，格式：`https://author.baidu.com/home/{uid}` |
-| `cookies_str` | str | 百度登录 Cookie 字符串                                    |
-
-**返回**
+将 `.env.example` 复制为本机 `.env` 并填入自己的凭据。库本身不自动读取 `.env`；可通过环境变量或自己的配置程序传入。`.env` 被 Git 忽略。请勿提交 Cookie、Creator token、App Token 或含凭据的流量记录。
 
 ```python
-(user_info: dict, uk: str, otherext: str)
-# user_info 包含：账号昵称、头像地址URL、账号KEY、粉丝数量、总发布量、点赞数量、采集时间 等
+import os
+from baijia_apis import BaijiaAuth, BaijiaContentAPI
+
+with BaijiaAuth.from_cookie(os.environ["BAIDU_COOKIES"]) as auth:
+    print(auth.login_state())
+    item = BaijiaContentAPI(auth).get_article("1839669810600928968")
+    print(item["title"], item["author"])
 ```
 
----
-
-### `get_user_posted(uk, otherext, cookies_str, top_dynamic_id=None, ctime=None)`
-
-获取用户**发帖动态列表**，每页 10 条，支持翻页游标。
-
-**参数**
-
-| 参数               | 类型       | 说明                              |
-|------------------|----------|---------------------------------|
-| `uk`             | str      | 用户 uk，由 `get_user_info` 返回      |
-| `otherext`       | str      | 版本标识，由 `get_user_info` 返回       |
-| `cookies_str`    | str      | 百度登录 Cookie 字符串                 |
-| `top_dynamic_id` | str/None | 翻页游标（上一页第一条动态 ID），首页传 `None`    |
-| `ctime`          | str/None | 翻页时间戳游标，首页传 `None`              |
-
-**返回**
+`from_cookie` 复用已登录浏览器的 Cookie；不会替用户完成扫码或短信登录。需要 Creator 图片上传时还需提供 `creator_token` 和 `app_id`。`refresh_creator_token()` 对 `builder/app/appinfo` 发 HEAD 请求，从响应头读取更新后的 token；这条刷新流程也未做有凭据实测。
 
 ```python
-# 原始 JSON，data.list 为动态列表，data.hasMore 为是否有下一页
-{
-  "data": {
-    "list": [...],
-    "hasMore": 1,
-    "query": {"ctime": "..."}
-  }
-}
+import os
+from baijia_apis import BaijiaAuth, BaijiaCreatorAPI
+
+with BaijiaAuth.from_cookie(
+    os.environ["BAIDU_COOKIES"],
+    creator_token=os.environ["BAIJIA_CREATOR_TOKEN"],
+    app_id=os.environ["BAIJIA_APP_ID"],
+) as auth:
+    # 调用后会把本地图片上传到账号的 Creator 素材库。
+    # cover_url = BaijiaCreatorAPI(auth).upload_image("cover.png")
+    pass
 ```
 
----
-
-### `get_work_info(item, uk, cookies_str)`
-
-获取单条内容的**互动数据**（点赞、评论、阅读、转发、收藏）。
-
-**参数**
-
-| 参数            | 类型  | 说明                                   |
-|---------------|-----|--------------------------------------|
-| `item`        | dict | 动态元数据，包含 `feed_id`、`dynamic_id` 等字段 |
-| `uk`          | str | 用户 uk                                |
-| `cookies_str` | str | 百度登录 Cookie 字符串                      |
-
-**返回**
+## 搜索与 Item
 
 ```python
-{
-  "praise_num": 42,       # 点赞数
-  "comment_num": 10,      # 评论数
-  "read_num": 1000,       # 阅读数
-  "forward_num": 5,       # 转发数
-  "live_back_num": 0,     # 直播回放数
-  "collect": 8,           # 收藏数
-  "unread": 0
-}
+from baijia_apis import BaijiaAuth, BaijiaContentAPI, BaijiaSearchAPI
+
+with BaijiaAuth() as auth:
+    content = BaijiaContentAPI(auth)
+    article = content.get_article("https://baijiahao.baidu.com/s?id=1839669810600928968")
+    print(article["id"], article["content"][:80])
+
+    search = BaijiaSearchAPI(auth)
+    # 网页搜索可能要求人工安全验证；此时抛出 BaijiaSearchBlocked。
+    # result = search.search_articles("AI 趋势", page=1)
 ```
 
----
+指定作者的本地搜索：先用 `get_user_info()` 得到 `uk` 和 `otherext`，再调用 `search_user_posts(uk, otherext, query, max_pages=3)`。`get_item_metrics(item, uk)` 读取旧版动态的互动统计。公开文章 `get_article()` 与互动统计是两种不同数据源。
 
-### `check_cookies_alive(cookies_strs)`
+## 图文发布
 
-批量检测 Cookie 列表的**有效性**。
+百家号开放接口需账号获得 App ID / App Token。封面传 HTTPS 图片 URL；如需把本地图片上传到 Creator 素材库，可使用 `upload_image()`，它另需 Cookie 和 Creator token。两类身份材料在同一个 `BaijiaAuth` 中可同时提供。
 
-**参数**
+```python
+import os
+from baijia_apis import BaijiaAuth, BaijiaCreatorAPI
 
-| 参数              | 类型        | 说明               |
-|-----------------|-----------|------------------|
-| `cookies_strs`  | list[str] | Cookie 字符串列表     |
-
-## 🐳 Docker 部署
-
-```bash
-docker build -t baidu-platform .
-docker run -d baidu-platform
+with BaijiaAuth.from_partner_token(
+    os.environ["BAIJIA_APP_ID"], os.environ["BAIJIA_APP_TOKEN"]
+) as auth:
+    creator = BaijiaCreatorAPI(auth)
+    # 显式调用以下方法才会提交作品。
+    # result = creator.publish_article(
+    #     "示例标题", "<p>示例正文</p>",
+    #     origin_url="https://example.com/original",
+    #     cover_urls=["https://example.com/cover.jpg"],
+    # )
+    # status = creator.query_article_status(result["data"]["article_id"])
 ```
 
-## 🍥 日志
+`publish_article()` 返回平台原始 JSON；当 `errno` 非零时抛 `BaijiaAPIError`。开放接口可能要求账号审核通过、特定标题/封面规格或原文地址；这些约束需要用有权限账号按平台当前规则验证。当前没有视频发布方法，也不把网页后台的内部字段冒充稳定开放 API。
 
-| 日期       | 说明                                  |
-|----------|-------------------------------------|
-| 26/04/11 | 项目初始化，完成用户信息、发帖列表、作品互动数据采集接口封装 |
+## 旧版兼容
 
-## 🤝 欢迎贡献 PR
+```python
+from baidu_apis import BaiduApis
 
-本项目欢迎任何形式的贡献！如果你有新功能想法、Bug 修复或文档改进，欢迎提交 PR。
+api = BaiduApis()
+# api.get_user_info(user_url, cookies_str)
+# api.get_user_posted(uk, otherext, cookies_str)
+# api.get_work_info(item, uk, cookies_str)
+# api.check_cookies_alive(cookies_strs)
+```
 
-- Fork 本仓库并在新分支上开发
-- 保持代码风格与现有代码一致
-- PR 描述中请简要说明改动内容和目的
+旧方法仍使用原有参数与返回结构。新模块不修改旧调用路径；迁移时可逐个换用 `BaijiaContentAPI`。
 
-## 🧸 额外说明
-1. 感谢 star⭐ 和 follow📰！不时更新
-2. 作者的联系方式在主页里，有问题可以随时联系我
-3. 可以关注下作者的其他项目，欢迎 PR 和 issue
-4. 感谢赞助！如果此项目对您有帮助，请作者喝一杯奶茶~~ （开心一整天😊😊）
-5. thank you~~~
+## 验证
 
-## 🍔 交流群
+```powershell
+python -m unittest discover -s tests -v
+```
 
-如果你对爬虫和 AI Agent 感兴趣，可以加入群聊一起讨论~
+离线测试验证 Cookie 处理、请求 URL/参数/Body、JSONP 解析、分页游标、公开 Item 解析及发布/上传请求契约。发布、上传、登录和全站搜索尚未完成真实账号端到端验证。
 
-ps: 请加群，人满或者过期 issue | wx 提醒 | qq提醒
+## 端点依据
 
-| group-1 | group-2 | group-3 | group-4 (2000人qq群) |
-|:--:|:--:|:--:|:--:|
-| <img width="280" alt="group1" src="https://cvcat.site/assets/group1.jpg" /> | <img width="280" alt="group2" src="https://cvcat.site/assets/group2.jpg" /> | <img width="280" alt="group3" src="https://cvcat.site/assets/group3.jpg" /> | <img width="280" alt="group3" src="https://cvcat.site/assets/group4.jpg" /> |
+- 旧仓库源码 `baidu_apis.py`：作者页、动态 JSONP、互动指标。
+- [公开 Creator 客户端原始源码](https://github.com/ai-chen2050/obsidian-wechat-public-platform/blob/master/src/api.ts)：Creator token 刷新、图片上传与网页后台发布字段。本文只实现其中图片上传。
+- [公开百家号 SDK](https://github.com/onlyliu1001/BaiJiaHaoSdk)：App ID / Token 图文发布与文章状态查询。开放接口路由已单独匿名探测，请求字段仍需账号核对。

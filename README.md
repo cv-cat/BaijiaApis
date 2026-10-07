@@ -7,7 +7,8 @@
 | 能力 | 入口 | 当前状态 |
 | --- | --- | --- |
 | Cookie 会话校验 | `BaijiaAuth.from_http_login()`、`from_cookie()`、`require_logged_in()` | `GET /builder/app/appinfo` 的 HTTP JSON 契约已实现；调用方必须提供完整 Cookie 请求头 |
-| 二维码、短信、验证码登录 | `from_qrcode_login()` | 协议尚无可核实抓包证据，入口显式抛 `BaijiaLoginProtocolUnavailable`，不猜测回调或绕过挑战 |
+| 二维码登录 | `BaijiaAuth.from_qrcode_login()`、`BaijiaQRCodeLogin` | CAS 二维码取图、`qrget` 轮询和确认表单均为纯 HTTP；扫码由百度 App 完成，库只返回挑战状态 |
+| 短信、图片验证码和滑块 | `from_http_login()` / challenge 状态 | Passport 安全控件和验证码由百度服务端完成；未猜测动态签名，也不绕过挑战 |
 | 公开文章 Item | `BaijiaContentAPI.get_article()` | 匿名 HTTP GET 解析标题、作者、更新时间和正文 |
 | 全站文章搜索 | `BaijiaSearchAPI.search_articles()` | 百度网页搜索 `site:` 结果解析；遇安全验证抛 `BaijiaSearchBlocked` |
 | 作者动态、互动 | `BaijiaContentAPI.get_user_info/get_user_posts/get_item_metrics()` | 旧版 JSONP 参数和解析器已保留，需有效 Cookie 才能访问动态接口 |
@@ -55,9 +56,34 @@ finally:
     auth.close()
 ```
 
-### 登录协议边界
+### 纯 HTTP 二维码登录
 
-`from_browser_login()` 和 `from_qrcode_login()` 只作为旧代码的兼容名称，调用时立即抛 `BaijiaLoginProtocolUnavailable`，不会创建窗口或发起未核实的登录请求。当前任务目录没有百家号扫码、短信或验证码请求/响应样本，因此仓库不伪造二维码生成、轮询、票据交换或验证码校验端点。拿到脱敏的真实请求序列后，再按同一 `curl_cffi` 会话补齐协议并增加回放测试。
+二维码登录不启动浏览器。`common-login` 页面实际使用百度 CAS 的三个请求：
+
+1. `GET https://cas.baidu.com/?action=qrcode&appid=3&t=<毫秒>`，Session 接收 HttpOnly `QGCSSID`，响应是二维码 PNG；
+2. 用同一 Session `POST https://cas.baidu.com/?action=qrget`，返回 `errno=30002` 表示等待扫码，`30001/30004` 表示过期或失效，其他状态原样保留；
+3. 用户在百度 App 中扫码确认后，提交 CAS 隐藏表单到 `?action=login`。库只接受服务端返回的 `redirecturl`，再用当前内存 Cookie 调用 `to_auth()` 校验 Creator 会话。
+
+```python
+from baijia_apis import BaijiaAuth
+
+login = BaijiaAuth.from_qrcode_login()
+try:
+    challenge = login.start()
+    # 把 challenge.image 交给你自己的 UI/二维码查看器；不要写入仓库。
+    while True:
+        state = login.poll()
+        if state.state in {"expired", "invalid", "refresh"}:
+            raise RuntimeError(f"二维码失效：{state.errno}")
+        if state.state == "approved":
+            login.complete()
+            auth = login.to_auth()
+            break
+finally:
+    login.close()
+```
+
+`from_browser_login()` 仍保留为兼容名称，但会立即抛 `BaijiaLoginProtocolUnavailable`；仓库没有任何 Playwright 或浏览器 Cookie 读取。短信密码、动态图片验证码和滑块由百度 Passport/安全控件完成，客户端只报告 `challenge` 或 `BaijiaSearchBlocked`，不伪造参数、不绕过验证。二维码图片和 Cookie 都只存在于进程内，不写日志或文件。
 
 ## 搜索与 Item
 

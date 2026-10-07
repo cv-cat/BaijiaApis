@@ -7,6 +7,9 @@ from .auth import (
     BaijiaLoginProtocolUnavailable,
     BaijiaLoginTimeout,
     BaijiaParseError,
+    BaijiaQRCodeChallenge,
+    BaijiaQRCodeLogin,
+    BaijiaQRCodePoll,
 )
 from .content import BaijiaContentAPI
 from .creator import BaijiaCreatorAPI
@@ -19,6 +22,9 @@ __all__ = [
     "BaijiaLoginProtocolUnavailable",
     "BaijiaLoginTimeout",
     "BaijiaParseError",
+    "BaijiaQRCodeChallenge",
+    "BaijiaQRCodeLogin",
+    "BaijiaQRCodePoll",
     "BaijiaContentAPI",
     "BaijiaCreatorAPI",
     "BaijiaSearchAPI",

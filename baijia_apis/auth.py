@@ -1,19 +1,29 @@
-"""百家号纯 HTTP 会话。
+"""百家号纯 HTTP 会话与 CAS challenge。
 
-登录材料必须由调用方以 Cookie/Token 形式提供。仓库不启动浏览器、不读取
-浏览器资料，也不猜测二维码、短信或验证码回调协议；这些流程的请求证据齐全
-之前，入口会明确报告协议未核实。
+仓库不启动浏览器、不读取浏览器资料。网页登录态可由 Cookie/Token 提供，
+二维码使用已核实的百度 CAS HTTP challenge；短信、图片验证码和滑块仍由
+百度 Passport/安全控件完成，客户端只报告服务端返回的挑战状态。
 """
 
 from __future__ import annotations
 
 import json
-from urllib.parse import urlparse
+import re
+import time
+from dataclasses import dataclass
+from urllib.parse import quote, urlparse
 
 from curl_cffi import requests
 
 
 APPINFO_URL = "https://baijiahao.baidu.com/builder/app/appinfo"
+CAS_BASE_URL = "https://cas.baidu.com/"
+CAS_QR_IMAGE_URL = f"{CAS_BASE_URL}?action=qrcode&appid=3"
+CAS_QR_STATUS_URL = f"{CAS_BASE_URL}?action=qrget"
+CAS_LOGIN_URL = f"{CAS_BASE_URL}?action=login"
+CAS_APP_ID = "647"
+CAS_LOGIN_FROM = "https://baijiahao.baidu.com/builder/theme/bjh/login?tab=uc"
+CAS_STATIC_PAGE = "https://baijiahao.baidu.com/builder/fe-react/casV3Jump.html"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -40,6 +50,30 @@ class BaijiaParseError(BaijiaAPIError):
     """平台返回内容与当前解析契约不符。"""
 
 
+@dataclass(frozen=True)
+class BaijiaQRCodeChallenge:
+    """一次百度 CAS 二维码挑战。
+
+    ``image`` 只保存在调用方内存中；库不写入二维码文件，因为二维码本身
+    带有一次性登录票据。``errno`` 和 ``state`` 来自 CAS 的原始状态。
+    """
+
+    image: bytes
+    content_type: str
+    state: str = "waiting"
+    errno: int = 30002
+
+
+@dataclass(frozen=True)
+class BaijiaQRCodePoll:
+    """CAS ``qrget`` 的脱敏状态。"""
+
+    state: str
+    errno: int
+    message: str = ""
+    redirect_url: str = ""
+
+
 def parse_cookies(cookie_header: str) -> dict[str, str]:
     """只拆第一个等号，保留 Cookie 值中的 ``=``。"""
     if "\r" in cookie_header or "\n" in cookie_header:
@@ -60,6 +94,233 @@ def response_json(response) -> dict:
     if not isinstance(result, dict):
         raise BaijiaParseError("接口应返回 JSON 对象")
     return result
+
+
+class BaijiaQRCodeLogin:
+    """百度 CAS 二维码登录的纯 HTTP 会话。
+
+    页面使用 ``common-login`` SDK 调用三个已核实的请求：取二维码、轮询
+    ``qrget``、在扫码确认后提交隐藏表单。这里保留同一个 ``curl_cffi``
+    Session，使 CAS 的 HttpOnly ``QGCSSID`` 自动随请求发送。二维码、扫码
+    确认和图片验证码由百度客户端/服务端完成；库只报告状态，不尝试伪造
+    或绕过挑战。
+    """
+
+    _ALLOWED_HOSTS = {"cas.baidu.com"}
+
+    def __init__(
+        self,
+        *,
+        session=None,
+        timeout: float = 20,
+        app_id: str = CAS_APP_ID,
+        fromu: str = CAS_LOGIN_FROM,
+        selfu: str = CAS_STATIC_PAGE,
+        jumppage: str = CAS_STATIC_PAGE,
+        acs_token: str = "",
+    ):
+        if timeout <= 0:
+            raise ValueError("timeout 必须大于 0")
+        for label, value in (
+            ("app_id", app_id),
+            ("fromu", fromu),
+            ("selfu", selfu),
+            ("jumppage", jumppage),
+            ("acs_token", acs_token),
+        ):
+            if "\r" in value or "\n" in value:
+                raise ValueError(f"{label} 不能包含换行符")
+        for label, value in (("fromu", fromu), ("selfu", selfu), ("jumppage", jumppage)):
+            parsed = urlparse(value)
+            if parsed.scheme != "https" or not parsed.hostname or not parsed.hostname.endswith("baidu.com"):
+                raise ValueError(f"{label} 必须是 HTTPS 百度地址")
+        self.session = session if session is not None else requests.Session()
+        self._owns_session = session is None
+        self.timeout = timeout
+        self.app_id = str(app_id)
+        self.fromu = fromu
+        self.selfu = selfu
+        self.jumppage = jumppage
+        self.acs_token = acs_token.strip()
+        self._started = False
+        self._last_poll: BaijiaQRCodePoll | None = None
+
+    @staticmethod
+    def _with_acs_token(url: str, acs_token: str) -> str:
+        if not acs_token:
+            return url
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}acs-token={quote(acs_token, safe='')}"
+
+    def _request(self, method: str, url: str, **kwargs):
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() not in self._ALLOWED_HOSTS:
+            raise ValueError("二维码会话只允许请求 HTTPS cas.baidu.com")
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json, text/html, */*",
+            "Referer": CAS_LOGIN_FROM,
+            "Origin": "https://baijiahao.baidu.com",
+        }
+        headers.update(kwargs.pop("headers", {}) or {})
+        kwargs.setdefault("timeout", self.timeout)
+        kwargs.setdefault("allow_redirects", False)
+        kwargs.setdefault("impersonate", "chrome131")
+        return self.session.request(method.upper(), url, headers=headers, **kwargs)
+
+    def start(self) -> BaijiaQRCodeChallenge:
+        """获取二维码图片并建立 CAS ``QGCSSID`` 会话。"""
+
+        url = self._with_acs_token(CAS_QR_IMAGE_URL, self.acs_token)
+        response = self._request("GET", url, params={"t": str(int(time.time() * 1000))})
+        if not 200 <= response.status_code < 300:
+            raise BaijiaAPIError(f"CAS 二维码 HTTP {response.status_code}")
+        content_type = (response.headers.get("content-type") or "").split(";", 1)[0].lower()
+        if not response.content or not content_type.startswith("image/"):
+            raise BaijiaParseError("CAS 二维码响应不是图片")
+        self._started = True
+        self._last_poll = BaijiaQRCodePoll(state="waiting", errno=30002, message="qrcode inited")
+        return BaijiaQRCodeChallenge(
+            image=bytes(response.content),
+            content_type=content_type,
+            state="waiting",
+            errno=30002,
+        )
+
+    def poll(self) -> BaijiaQRCodePoll:
+        """轮询一次扫码状态；不自动重试，也不修改挑战。"""
+
+        if not self._started:
+            raise BaijiaAuthError("请先调用 BaijiaQRCodeLogin.start() 获取二维码")
+        response = self._request("POST", self._with_acs_token(CAS_QR_STATUS_URL, self.acs_token))
+        if not 200 <= response.status_code < 300:
+            raise BaijiaAPIError(f"CAS 二维码状态 HTTP {response.status_code}")
+        data = response_json(response)
+        try:
+            errno = int(data.get("errno"))
+        except (TypeError, ValueError) as exc:
+            raise BaijiaParseError("CAS 二维码状态缺少 errno") from exc
+        message = str(data.get("errmsg") or data.get("e") or "")
+        if errno == 30002:
+            state = "waiting"
+        elif errno == 30003:
+            state = "scanned"
+        elif errno == 30001:
+            state = "expired"
+        elif errno == 30004:
+            state = "invalid"
+        elif errno == 30005:
+            state = "refresh"
+        elif errno == 0:
+            state = "approved"
+        else:
+            state = "challenge"
+        result = BaijiaQRCodePoll(state=state, errno=errno, message=message)
+        self._last_poll = result
+        return result
+
+    def _login_form(self) -> dict[str, str]:
+        # 与 common-login/main.js 的 uc-qrcode-form 保持字段和取值一致。
+        return {
+            "appid": self.app_id,
+            "specialFlag": "qrcode",
+            "senderr": "1",
+            "fromu": self.fromu,
+            "selfu": self.selfu,
+            "jumppage": self.jumppage,
+            "isajax": "1",
+            "version": "2.3.0",
+        }
+
+    @staticmethod
+    def _extract_redirect(text: str) -> str:
+        if not text:
+            return ""
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            data = None
+        if isinstance(data, dict):
+            for key in ("redirecturl", "redirect_url", "url"):
+                value = data.get(key)
+                if value:
+                    return str(value)
+        # isajax 的 iframe 回调通常是 JSON；这里仅提取服务端明确返回的 URL，
+        # 不执行页面脚本，也不拼接未知参数。
+        match = re.search(r'"redirecturl"\s*:\s*"([^"]+)"', text)
+        return match.group(1) if match else ""
+
+    def complete(self) -> str:
+        """用扫码确认后的 CAS 票据提交隐藏表单，返回服务端重定向地址。
+
+        只有 ``errno=0`` 才会提交。若仍是 ``waiting``/``scanned``，调用方
+        应继续轮询，让用户在百度 App 中完成确认。
+        """
+
+        if not self._started:
+            raise BaijiaAuthError("请先调用 BaijiaQRCodeLogin.start() 获取二维码")
+        current = self._last_poll or self.poll()
+        if current.state != "approved":
+            raise BaijiaAuthError(f"二维码尚未确认：errno={current.errno}")
+        response = self._request(
+            "POST",
+            self._with_acs_token(CAS_LOGIN_URL, self.acs_token),
+            data=self._login_form(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if response.status_code in {301, 302, 303, 307, 308}:
+            redirect = response.headers.get("location", "")
+        else:
+            if not 200 <= response.status_code < 300:
+                raise BaijiaAPIError(f"CAS 二维码确认 HTTP {response.status_code}")
+            redirect = self._extract_redirect(response.text)
+        if not redirect:
+            data = None
+            try:
+                data = response_json(response)
+            except BaijiaParseError:
+                pass
+            errno = data.get("errno") if isinstance(data, dict) else "unknown"
+            message = data.get("e") or data.get("errmsg") if isinstance(data, dict) else ""
+            raise BaijiaAuthError(f"CAS 二维码确认未返回重定向：errno={errno} {message}".strip())
+        return redirect
+
+    def cookie_header(self) -> str:
+        """从当前内存会话生成 Cookie 头，不把值写入日志或文件。"""
+
+        jar = getattr(self.session, "cookies", None)
+        if jar is None:
+            return ""
+        if hasattr(jar, "get_dict"):
+            values = jar.get_dict()
+        elif isinstance(jar, dict):
+            values = jar
+        else:
+            values = {}
+            try:
+                for cookie in jar:
+                    values[getattr(cookie, "name", "")] = getattr(cookie, "value", "")
+            except TypeError:
+                values = {}
+        return "; ".join(f"{name}={value}" for name, value in values.items() if name)
+
+    def to_auth(self) -> "BaijiaAuth":
+        """扫码确认后用当前会话 Cookie 建立并校验 BaijiaAuth。"""
+
+        cookie = self.cookie_header()
+        if not cookie:
+            raise BaijiaAuthError("CAS 已确认但会话没有返回 Cookie")
+        return BaijiaAuth.from_http_login(cookie=cookie, session=self.session, timeout=self.timeout)
+
+    def close(self) -> None:
+        if self._owns_session:
+            self.session.close()
+
+    def __enter__(self) -> "BaijiaQRCodeLogin":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
 
 class BaijiaAuth:
@@ -137,15 +398,25 @@ class BaijiaAuth:
         )
 
     @classmethod
+    def start_qrcode_login(cls, **kwargs) -> BaijiaQRCodeLogin:
+        """创建纯 HTTP CAS 二维码会话；调用方负责展示图片和提示用户扫码。"""
+
+        return BaijiaQRCodeLogin(**kwargs)
+
+    @classmethod
     def from_qrcode_login(
         cls,
         **_kwargs,
-    ) -> "BaijiaAuth":
-        """二维码登录协议未核实，避免猜测回调或绕过验证码。"""
-        raise BaijiaLoginProtocolUnavailable(
-            "百家号二维码/短信登录的请求链路尚无可核实抓包证据；"
-            "请先在官方客户端完成登录，再把同源 Cookie 交给 from_http_login。"
-        )
+    ) -> BaijiaQRCodeLogin:
+        """兼容入口，返回可轮询的纯 HTTP 二维码会话。
+
+        该方法不会阻塞等待，也不会打开浏览器。典型用法是
+        ``challenge = BaijiaAuth.from_qrcode_login(); challenge.start()``，
+        之后循环 ``poll()``，在 ``approved``/``scanned`` 状态调用
+        ``complete()`` 和 ``to_auth()``。
+        """
+
+        return cls.start_qrcode_login(**_kwargs)
 
     @classmethod
     def from_partner_token(cls, app_id: str, app_token: str, **kwargs) -> "BaijiaAuth":

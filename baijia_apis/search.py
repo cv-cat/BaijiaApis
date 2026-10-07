@@ -18,15 +18,36 @@ class BaijiaSearchBlocked(BaijiaAPIError):
 
 
 class _SearchLinks(HTMLParser):
+    _VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.links = []
         self.current = None
+        self.card = None
+        self.card_depth = 0
+        self.title_depth = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag != "a":
-            return
         attrs = dict(attrs)
+        if self.card is not None and tag not in self._VOID_TAGS:
+            self.card_depth += 1
+            if self.title_depth:
+                self.title_depth += 1
+            elif tag == "h3":
+                self.title_depth = 1
+        elif tag == "div" and attrs.get("mu"):
+            value = attrs["mu"]
+            try:
+                article_id_from(value)
+            except ValueError:
+                pass
+            else:
+                self.card = {"url": value, "title": ""}
+                self.card_depth = 1
+                return
+        if tag != "a" or self.card is not None:
+            return
         for name in ("href", "data-url", "data-landurl"):
             value = attrs.get(name) or ""
             if urlparse(value).hostname == "baijiahao.baidu.com":
@@ -38,10 +59,25 @@ class _SearchLinks(HTMLParser):
                 break
 
     def handle_data(self, data):
+        if self.card is not None and self.title_depth:
+            self.card["title"] += data
         if self.current is not None:
             self.current["title"] += data
 
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in self._VOID_TAGS:
+            self.handle_endtag(tag)
+
     def handle_endtag(self, tag):
+        if self.card is not None:
+            if self.title_depth:
+                self.title_depth -= 1
+            self.card_depth -= 1
+            if self.card_depth == 0:
+                self.card["title"] = " ".join(self.card["title"].split())
+                self.links.append(self.card)
+                self.card = None
         if tag == "a" and self.current is not None:
             self.current["title"] = " ".join(self.current["title"].split())
             self.links.append(self.current)
@@ -56,7 +92,7 @@ class BaijiaSearchAPI:
     def search_articles(self, query: str, *, page: int = 1) -> dict:
         """百度网页搜索中限定百家号域；这是网页搜索，不是百家号私有 API。
 
-        当前出口会触发百度安全验证，因此此方法的请求与解析契约仅离线测试。
+        百度可能要求人工安全验证，届时抛出 ``BaijiaSearchBlocked``。
         """
         query = query.strip()
         if not query:
@@ -65,7 +101,7 @@ class BaijiaSearchAPI:
             raise ValueError("page 从 1 开始")
         response = self.auth.request(
             "GET", SEARCH_URL, use_cookie=False,
-            params={"wd": f"site:baijiahao.baidu.com/s {query}", "pn": (page - 1) * 10},
+            params={"wd": f"site:baijiahao.baidu.com {query}", "pn": (page - 1) * 10},
             headers={"Referer": "https://www.baidu.com/"},
         )
         html = response.text
@@ -80,7 +116,7 @@ class BaijiaSearchAPI:
             if article_id not in seen:
                 seen.add(article_id)
                 items.append({"id": article_id, **item})
-        if not items and "没有找到" not in html and "无相关结果" not in html:
+        if not items and all(marker not in html for marker in ("没有找到", "未找到相关结果", "无相关结果")):
             raise BaijiaParseError("搜索页没有可解析的百家号直链")
         return {"query": query, "page": page, "items": items}
 

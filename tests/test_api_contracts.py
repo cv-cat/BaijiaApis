@@ -131,7 +131,21 @@ class SearchTests(unittest.TestCase):
             api.search_articles("AI", page=2)
         method, url, kwargs = session.calls[0]
         self.assertEqual((method, url), ("GET", "https://www.baidu.com/s"))
-        self.assertEqual(kwargs["params"], {"wd": "site:baijiahao.baidu.com/s AI", "pn": 10})
+        self.assertEqual(kwargs["params"], {"wd": "site:baijiahao.baidu.com AI", "pn": 10})
+
+    def test_site_search_reads_baidu_result_mu_and_title(self):
+        html = (
+            '<div class="result" mu="https://baijiahao.baidu.com/s?id=123&wfr=spider">'
+            '<h3><a href="http://www.baidu.com/link?url=redacted">咖啡<em>入门</em></a></h3>'
+            '<p>搜索摘要不应进入标题</p></div>'
+        )
+        session = FakeSession(FakeResponse(text=html))
+        items = BaijiaSearchAPI(BaijiaAuth(session=session)).search_articles("咖啡")["items"]
+        self.assertEqual(items, [{"id": "123", "url": "https://baijiahao.baidu.com/s?id=123&wfr=spider", "title": "咖啡入门"}])
+
+    def test_site_search_empty_results_are_not_parse_error(self):
+        session = FakeSession(FakeResponse(text="<p>抱歉，未找到相关结果。</p>"))
+        self.assertEqual(BaijiaSearchAPI(BaijiaAuth(session=session)).search_articles("不存在的文章")["items"], [])
 
     def test_author_search_uses_response_cursor(self):
         first = {"data": {"list": [{"dynamic_id": "first", "title": "猫"}], "hasMore": 1, "query": {"ctime": "100"}}}

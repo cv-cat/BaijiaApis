@@ -6,13 +6,13 @@
 
 | 能力 | 入口 | 状态与证据 |
 | --- | --- | --- |
-| Cookie 登录会话 | `BaijiaAuth.from_browser_login()`、`from_qrcode_login()`、`from_cookie()`、`require_logged_in()` | 当前 Chrome 使用手机号登录后，同源只读 GET `builder/app/appinfo` 已实测 HTTP 200、`errno=0` 且返回 `data.user`。独立 Playwright 新窗口登录流程尚未实测。 |
+| Cookie 登录会话 | `BaijiaAuth.from_browser_login()`、`from_qrcode_login()`、`from_cookie()`、`require_logged_in()` | 当前 Chrome 使用手机号登录后，同源只读 GET `builder/app/appinfo` 已实测 HTTP 200、`errno=0` 且返回 `data.user`；当前会话 Cookie 在库的 `from_cookie().require_logged_in()` 也通过在线校验。独立 Playwright 新窗口登录流程尚未实测。 |
 | 本人网页作品列表 | `BaijiaCreatorAPI.list_web_works()` | 当前登录会话的 `GET pcui/article/lists` 已实测 HTTP 200、`errno=0`，无需伙伴 App Token；全部、图文、图文草稿视图与分页参数已核对。当前账号列表为空。库中独立 Cookie 请求尚未实测。 |
 | 网页图文草稿 | `BaijiaCreatorAPI.save_web_draft()`、`delete_web_draft()` | 当前 Chrome 官方编辑器已实测保存与删除临时草稿：均用 Cookie 与 Creator `token` 头；删除后草稿列表为空。库中独立 HTTP 调用尚未实测。 |
 | 作者资料、动态、互动数据 | `BaijiaContentAPI.get_user_info/get_user_posts/get_item_metrics` | 公开作者主页已匿名 GET 实测；动态和互动沿用旧仓库的 `mbd.baidu.com/webpage` JSONP 契约，新增解析和请求契约测试，尚未用有效账号回放。 |
 | 公开文章 Item | `BaijiaContentAPI.get_article()` | 已对公开 `baijiahao.baidu.com/s?id=...` 页面做匿名 GET 实测，解析标题、作者、更新时间与正文。HTML 结构变化可能需要更新解析器。 |
 | 指定作者内容搜索 | `BaijiaSearchAPI.search_user_posts()` | 逐页读取作者动态，按文字在本地筛选。依赖上述动态接口。 |
-| 全站文章搜索 | `BaijiaSearchAPI.search_articles()` | 使用百度网页搜索的 `site:` 条件。当前网络出口收到“百度安全验证”；解析只做了离线契约测试，未验证正常搜索页。它不是百家号站内私有 API。 |
+| 全站文章搜索 | `BaijiaSearchAPI.search_articles()` | 使用百度网页搜索的 `site:` 条件。已按实际结果卡片的 `mu` 文章直链解析，库中匿名搜索“咖啡”返回 9 篇，第一篇接续 `get_article()` 取到正文；当前 Chrome 登录会话也可浏览同一搜索结果与 Item。重复请求可能收到“百度安全验证”，此时抛 `BaijiaSearchBlocked`；一次携带已登录 Cookie 的库中连贯验收即遇到该验证，因此不能宣称登录→搜索→Item 的 Python E2E 稳定通过。它不是百家号站内私有 API。 |
 | 图文发布与状态查询 | `BaijiaCreatorAPI.publish_article/query_article_status` | 百家号 App ID / Token 开放接口路由可达，匿名 GET 返回参数错误；POST 请求格式来自公开实现，**未用具备权限的账号发布或查询**。 |
 | 本地图片上传 | `BaijiaCreatorAPI.upload_image()` | `pcui/picture/uploadproxy` 路由可达；表单字段依据公开 Creator 客户端源码，未做账号实测。也可直接向图文发布接口传已托管的 HTTPS 封面 URL。 |
 | 视频发布 | — | 未核实端点及上传链路，暂未实现。 |
@@ -91,7 +91,9 @@ with BaijiaAuth() as auth:
 
     search = BaijiaSearchAPI(auth)
     # 网页搜索可能要求人工安全验证；此时抛出 BaijiaSearchBlocked。
-    # result = search.search_articles("AI 趋势", page=1)
+    result = search.search_articles("咖啡", page=1)
+    item = content.get_article(result["items"][0]["id"])
+    print(item["title"], len(item["content"]))
 ```
 
 指定作者的本地搜索：先用 `get_user_info()` 得到 `uk` 和 `otherext`，再调用 `search_user_posts(uk, otherext, query, max_pages=3)`。`get_item_metrics(item, uk)` 读取旧版动态的互动统计。公开文章 `get_article()` 与互动统计是两种不同数据源。

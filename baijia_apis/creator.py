@@ -150,6 +150,9 @@ class BaijiaCreatorAPI:
         result = response_json(response)
         if result.get("errno") not in (0, "0"):
             raise BaijiaAPIError(f"图文发布失败：errno={result.get('errno')}，{result.get('errmsg', '')}")
+        article_id = (result.get("data") or {}).get("article_id") if isinstance(result.get("data"), dict) else None
+        if not str(article_id or "").isascii() or not str(article_id or "").isdigit():
+            raise BaijiaParseError("平台返回发布成功，但缺少有效的 data.article_id；请先在后台核对，勿直接重试")
         return result
 
     def query_article_status(self, article_ids: str | Iterable[str]) -> dict:

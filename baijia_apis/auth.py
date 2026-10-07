@@ -102,8 +102,11 @@ class BaijiaAuth:
             request_headers.update(headers)
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("impersonate", "chrome101")
+        # Cookie 与开放接口 token 不应跟随平台跳转，避免把登录页当作接口成功。
+        if (self.cookie and use_cookie) or method.upper() != "GET":
+            kwargs.setdefault("allow_redirects", False)
         response = self.session.request(method.upper(), url, headers=request_headers, **kwargs)
-        if not 200 <= response.status_code < 400:
+        if not 200 <= response.status_code < 300:
             raise BaijiaAPIError(f"HTTP {response.status_code}: {parsed.path}")
         return response
 
@@ -114,7 +117,15 @@ class BaijiaAuth:
         return response_json(self.request("GET", APPINFO_URL, headers={"Referer": "https://baijiahao.baidu.com/"}))
 
     def is_logged_in(self) -> bool:
-        return self.login_state().get("errno") == 0
+        return str(self.login_state().get("errno")) == "0"
+
+    def require_logged_in(self) -> dict:
+        """只读验证浏览器 Cookie，返回账号信息或给出明确的失败码。"""
+        state = self.login_state()
+        code = state.get("errno")
+        if str(code) != "0":
+            raise BaijiaAuthError(f"Creator Cookie 未通过登录检测：errno={code}")
+        return state
 
     def refresh_creator_token(self) -> str:
         """按 Creator 客户端已观察的 HEAD 请求读取响应头 token。"""

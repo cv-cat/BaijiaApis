@@ -5,6 +5,7 @@ from baidu_apis import BaiduApis
 from baijia_apis import (
     BaijiaAPIError,
     BaijiaAuth,
+    BaijiaAuthError,
     BaijiaContentAPI,
     BaijiaCreatorAPI,
     BaijiaParseError,
@@ -54,6 +55,34 @@ class AuthTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             auth.request("GET", "https://example.com/collect")
         self.assertEqual(session.calls, [])
+
+    def test_browser_cookie_preflight_and_redirect_handling(self):
+        session = FakeSession(
+            FakeResponse(data={"errno": "0", "data": {"name": "作者"}}),
+            FakeResponse(data={"errno": "0", "data": {"name": "作者"}}),
+            FakeResponse(data={"errno": 10001401, "data": None}),
+            FakeResponse(status_code=302),
+        )
+        auth = BaijiaAuth.from_cookie("BAIDUID=x", session=session)
+        self.assertTrue(auth.is_logged_in())
+        self.assertEqual(auth.require_logged_in()["data"]["name"], "作者")
+        with self.assertRaisesRegex(BaijiaAuthError, "10001401"):
+            auth.require_logged_in()
+        with self.assertRaisesRegex(BaijiaAPIError, "HTTP 302"):
+            auth.login_state()
+        self.assertTrue(all(call[2]["allow_redirects"] is False for call in session.calls))
+
+    def test_creator_token_refresh_uses_existing_browser_credentials(self):
+        session = FakeSession(FakeResponse(headers={"token": "new-token"}))
+        auth = BaijiaAuth.from_cookie(
+            "BAIDUID=x", creator_token="old-token", session=session,
+        )
+        self.assertEqual(auth.refresh_creator_token(), "new-token")
+        method, url, kwargs = session.calls[0]
+        self.assertEqual((method, url), ("HEAD", "https://baijiahao.baidu.com/builder/app/appinfo"))
+        self.assertEqual(kwargs["headers"]["Cookie"], "BAIDUID=x")
+        self.assertEqual(kwargs["headers"]["token"], "old-token")
+        self.assertIs(kwargs["allow_redirects"], False)
 
 
 class ContentTests(unittest.TestCase):
@@ -140,7 +169,18 @@ class CreatorTests(unittest.TestCase):
             "cover_images": '[{"src":"https://example.com/a.jpg"}]',
         })
         self.assertNotIn("Cookie", kwargs["headers"])
+        self.assertIs(kwargs["allow_redirects"], False)
         self.assertEqual(session.calls[1][2]["json"]["article_id"], "123")
+
+    def test_publish_success_without_article_id_requires_manual_reconciliation(self):
+        session = FakeSession(FakeResponse(data={"errno": 0, "data": {}}))
+        api = BaijiaCreatorAPI(BaijiaAuth.from_partner_token("app-id", "app-token", session=session))
+        with self.assertRaisesRegex(BaijiaParseError, "勿直接重试"):
+            api.publish_article(
+                "测试标题示例", "<p>正文</p>", origin_url="https://example.com/original",
+                cover_urls=["https://example.com/cover.jpg"],
+            )
+        self.assertEqual(len(session.calls), 1)
 
     def test_publish_requires_origin_and_explicit_draft_choice(self):
         session = FakeSession(FakeResponse(data={"errno": 0, "data": {"article_id": "456"}}))

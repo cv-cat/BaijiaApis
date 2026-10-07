@@ -58,32 +58,14 @@ finally:
 
 ### 纯 HTTP 二维码登录
 
-二维码登录不启动浏览器。`common-login` 页面实际使用百度 CAS 的三个请求：
+二维码登录不启动浏览器。百家号登录页的实际 Passport 请求顺序是：
 
-1. `GET https://cas.baidu.com/?action=qrcode&appid=3&t=<毫秒>`，Session 接收 HttpOnly `QGCSSID`，响应是二维码 PNG；
-2. 用同一 Session `POST https://cas.baidu.com/?action=qrget`，返回 `errno=30002` 表示等待扫码，`30001/30004` 表示过期或失效，其他状态原样保留；
-3. 用户在百度 App 中扫码确认后，提交 CAS 隐藏表单到 `?action=login`。库只接受服务端返回的 `redirecturl`，再用当前内存 Cookie 调用 `to_auth()` 校验 Creator 会话。
+1. GET https://baijiahao.baidu.com/builder/theme/bjh/login，随后空 body 的 POST /user-ui/cms/allocTk 建立同源会话；
+2. GET https://passport.baidu.com/v2/api/getqrcode，按 Network 顺序发送 lp、qrloginfrom、gid、oauthLog、callback、apiver、tt、tpl、logPage、_，响应 JSONP 给出一次性 sign 和二维码图片 URL；
+3. 用同一 Session GET /channel/unicast 轮询，字段顺序为 channel_id、gid、tpl、_sdkFrom、callback、apiver、tt、_。扫码后服务端返回 channel_v；
+4. 用户在百度 App 中确认后，按浏览器编码调用 /v3/login/main/qrbdusslogin，再用当前内存 Cookie 调用 to_auth() 校验 Creator 会话。
 
-```python
-from baijia_apis import BaijiaAuth
-
-login = BaijiaAuth.from_qrcode_login()
-try:
-    challenge = login.start()
-    # 把 challenge.image 交给你自己的 UI/二维码查看器；不要写入仓库。
-    while True:
-        state = login.poll()
-        if state.state in {"expired", "invalid", "refresh"}:
-            raise RuntimeError(f"二维码失效：{state.errno}")
-        if state.state == "approved":
-            login.complete()
-            auth = login.to_auth()
-            break
-finally:
-    login.close()
-```
-
-`from_browser_login()` 仍保留为兼容名称，但会立即抛 `BaijiaLoginProtocolUnavailable`；仓库没有浏览器自动化或浏览器 Cookie 读取。短信密码、动态图片验证码和滑块由百度 Passport/安全控件完成，客户端只报告 `challenge` 或 `BaijiaSearchBlocked`，不伪造参数、不绕过验证。二维码图片和 Cookie 都只存在于进程内，不写日志或文件。
+所有 Passport callback、query 顺序和 URL 编码都由 BaijiaQRCodeLogin 显式构造。二维码图片、sign、bduss 和 Cookie 只存在于进程内，不写日志或文件。
 
 ## 搜索与 Item
 

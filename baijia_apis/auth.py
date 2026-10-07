@@ -1,7 +1,7 @@
-"""百家号纯 HTTP 会话与 CAS challenge。
+"""百家号纯 HTTP 会话与百度 Passport challenge。
 
 仓库不启动浏览器、不读取浏览器资料。网页登录态可由 Cookie/Token 提供，
-二维码使用已核实的百度 CAS HTTP challenge；短信、图片验证码和滑块仍由
+二维码使用浏览器 Network 中核实的百度 Passport JSONP challenge；短信、图片验证码和滑块仍由
 百度 Passport/安全控件完成，客户端只报告服务端返回的挑战状态。
 """
 
@@ -10,23 +10,28 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 from curl_cffi import requests
 
 
 APPINFO_URL = "https://baijiahao.baidu.com/builder/app/appinfo"
-CAS_BASE_URL = "https://cas.baidu.com/"
-CAS_QR_IMAGE_URL = f"{CAS_BASE_URL}?action=qrcode&appid=3"
-CAS_QR_STATUS_URL = f"{CAS_BASE_URL}?action=qrget"
-CAS_LOGIN_URL = f"{CAS_BASE_URL}?action=login"
-CAS_APP_ID = "647"
-CAS_LOGIN_FROM = "https://baijiahao.baidu.com/builder/theme/bjh/login?tab=uc"
-CAS_STATIC_PAGE = "https://baijiahao.baidu.com/builder/fe-react/casV3Jump.html"
+BAIJIA_LOGIN_PAGE = "https://baijiahao.baidu.com/builder/theme/bjh/login"
+ALLOC_TK_URL = "https://baijiahao.baidu.com/user-ui/cms/allocTk"
+GET_PASSINFO_URL = "https://baijiahao.baidu.com/user-ui/cms/getPassinfo"
+LOCK_UC_LOGIN_URL = "https://baijiahao.baidu.com/user-ui/cms/lockUcLogin"
+LOGIN_INFO_URL = "https://baijiahao.baidu.com/userb/user/loginInfo"
+PASSPORT_BASE_URL = "https://passport.baidu.com"
+PASSPORT_QR_INIT_URL = f"{PASSPORT_BASE_URL}/v2/api/getqrcode"
+PASSPORT_QR_POLL_URL = f"{PASSPORT_BASE_URL}/channel/unicast"
+PASSPORT_QR_LOGIN_URL = f"{PASSPORT_BASE_URL}/v3/login/main/qrbdusslogin"
+PASSPORT_CAP_INIT_URL = f"{PASSPORT_BASE_URL}/cap/init"
+PASSPORT_PRODUCT = "bjh"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 )
 
 
@@ -52,26 +57,29 @@ class BaijiaParseError(BaijiaAPIError):
 
 @dataclass(frozen=True)
 class BaijiaQRCodeChallenge:
-    """一次百度 CAS 二维码挑战。
+    """一次百度 Passport 二维码挑战。
 
     ``image`` 只保存在调用方内存中；库不写入二维码文件，因为二维码本身
-    带有一次性登录票据。``errno`` 和 ``state`` 来自 CAS 的原始状态。
+    带有一次性登录票据。``sign`` 仅用于同一会话的轮询。
     """
 
     image: bytes
     content_type: str
     state: str = "waiting"
-    errno: int = 30002
+    errno: int = 1
+    sign: str = ""
+    gid: str = ""
 
 
 @dataclass(frozen=True)
 class BaijiaQRCodePoll:
-    """CAS ``qrget`` 的脱敏状态。"""
+    """Passport ``channel/unicast`` 的脱敏状态。"""
 
     state: str
     errno: int
     message: str = ""
     redirect_url: str = ""
+    channel_status: str = ""
 
 
 def parse_cookies(cookie_header: str) -> dict[str, str]:
@@ -97,193 +105,302 @@ def response_json(response) -> dict:
 
 
 class BaijiaQRCodeLogin:
-    """百度 CAS 二维码登录的纯 HTTP 会话。
+    """百度 Passport 二维码登录的纯 HTTP 会话。
 
-    页面使用 ``common-login`` SDK 调用三个已核实的请求：取二维码、轮询
-    ``qrget``、在扫码确认后提交隐藏表单。这里保留同一个 ``curl_cffi``
-    Session，使 CAS 的 HttpOnly ``QGCSSID`` 自动随请求发送。二维码、扫码
-    确认和图片验证码由百度客户端/服务端完成；库只报告状态，不尝试伪造
-    或绕过挑战。
+    该契约来自百家号登录页 Network：先建立 Creator 会话，再用 Passport
+    getqrcode 取得 JSONP 票据，使用同一个 Session 轮询 channel/unicast。
+    扫码确认后的 channel_v 通过 v3/login/main/qrbdusslogin 换取登录 Cookie。
+    所有 callback、字段顺序和 URL 编码都由本类显式构造；不会执行页面脚本、
+    读取浏览器 Cookie 或绕过图片验证码/滑块。
     """
 
-    _ALLOWED_HOSTS = {"cas.baidu.com"}
+    _ALLOWED_HOSTS = {"passport.baidu.com", "baijiahao.baidu.com"}
 
     def __init__(
         self,
         *,
         session=None,
         timeout: float = 20,
-        app_id: str = CAS_APP_ID,
-        fromu: str = CAS_LOGIN_FROM,
-        selfu: str = CAS_STATIC_PAGE,
-        jumppage: str = CAS_STATIC_PAGE,
-        acs_token: str = "",
+        gid: str = "",
+        product: str = PASSPORT_PRODUCT,
+        qrloginfrom: str = "pc",
+        oauth_log: str = "",
+        log_page: str = "",
+        bootstrap: bool = True,
     ):
         if timeout <= 0:
             raise ValueError("timeout 必须大于 0")
         for label, value in (
-            ("app_id", app_id),
-            ("fromu", fromu),
-            ("selfu", selfu),
-            ("jumppage", jumppage),
-            ("acs_token", acs_token),
+            ("gid", gid),
+            ("product", product),
+            ("qrloginfrom", qrloginfrom),
+            ("oauth_log", oauth_log),
+            ("log_page", log_page),
         ):
-            if "\r" in value or "\n" in value:
+            if "\r" in str(value) or "\n" in str(value):
                 raise ValueError(f"{label} 不能包含换行符")
-        for label, value in (("fromu", fromu), ("selfu", selfu), ("jumppage", jumppage)):
-            parsed = urlparse(value)
-            if parsed.scheme != "https" or not parsed.hostname or not parsed.hostname.endswith("baidu.com"):
-                raise ValueError(f"{label} 必须是 HTTPS 百度地址")
         self.session = session if session is not None else requests.Session()
         self._owns_session = session is None
         self.timeout = timeout
-        self.app_id = str(app_id)
-        self.fromu = fromu
-        self.selfu = selfu
-        self.jumppage = jumppage
-        self.acs_token = acs_token.strip()
+        self.gid = gid.strip().upper() or str(uuid.uuid4()).upper()
+        self.product = product
+        self.qrloginfrom = qrloginfrom
+        self.oauth_log = oauth_log
+        self.log_page = log_page or f"traceId:pc_loginv4_{int(time.time())},logPage:loginv4"
+        self.bootstrap = bool(bootstrap)
+        self.callback = f"tangram_guid_{int(time.time() * 1000)}"
         self._started = False
+        self._sign = ""
+        self._channel_v: dict[str, object] = {}
         self._last_poll: BaijiaQRCodePoll | None = None
+        self.last_request: dict[str, object] = {}
 
     @staticmethod
-    def _with_acs_token(url: str, acs_token: str) -> str:
-        if not acs_token:
-            return url
-        separator = "&" if "?" in url else "?"
-        return f"{url}{separator}acs-token={quote(acs_token, safe='')}"
+    def _parse_jsonp(text: str) -> dict:
+        if not text:
+            raise BaijiaParseError("Passport JSONP 响应为空")
+        start = text.find("(")
+        end = text.rfind(")")
+        if start < 0 or end <= start:
+            raise BaijiaParseError("Passport 响应不是 JSONP")
+        try:
+            value = json.loads(text[start + 1:end])
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise BaijiaParseError("Passport JSONP 数据无效") from exc
+        if not isinstance(value, dict):
+            raise BaijiaParseError("Passport JSONP 应返回对象")
+        return value
 
     def _request(self, method: str, url: str, **kwargs):
         parsed = urlparse(url)
-        if parsed.scheme != "https" or (parsed.hostname or "").lower() not in self._ALLOWED_HOSTS:
-            raise ValueError("二维码会话只允许请求 HTTPS cas.baidu.com")
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or host not in self._ALLOWED_HOSTS:
+            raise ValueError("二维码会话只允许请求 HTTPS 百度 Passport/百家号域名")
         headers = {
             "User-Agent": USER_AGENT,
-            "Accept": "application/json, text/html, */*",
-            "Referer": CAS_LOGIN_FROM,
-            "Origin": "https://baijiahao.baidu.com",
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": BAIJIA_LOGIN_PAGE + "?tab=uc",
         }
         headers.update(kwargs.pop("headers", {}) or {})
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("allow_redirects", False)
-        kwargs.setdefault("impersonate", "chrome131")
-        return self.session.request(method.upper(), url, headers=headers, **kwargs)
+        kwargs.setdefault("impersonate", "chrome150")
+        response = self.session.request(method.upper(), url, headers=headers, **kwargs)
+        self.last_request = {"method": method.upper(), "url": url, "status": response.status_code}
+        return response
+
+    def _bootstrap_session(self) -> None:
+        page = self._request(
+            "GET",
+            BAIJIA_LOGIN_PAGE,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Upgrade-Insecure-Requests": "1",
+            },
+            allow_redirects=True,
+        )
+        if not 200 <= page.status_code < 400:
+            raise BaijiaAPIError(f"百家号登录页 HTTP {page.status_code}")
+        response = self._request(
+            "POST",
+            ALLOC_TK_URL,
+            data=b"",
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Content-Length": "0",
+                "Origin": "https://baijiahao.baidu.com",
+                "Referer": BAIJIA_LOGIN_PAGE,
+            },
+        )
+        if not 200 <= response.status_code < 300:
+            raise BaijiaAPIError(f"allocTk HTTP {response.status_code}")
+        json_headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Referer": BAIJIA_LOGIN_PAGE,
+            "token": "undefined",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+        passinfo = self._request("GET", GET_PASSINFO_URL + "?", headers=json_headers)
+        if not 200 <= passinfo.status_code < 300:
+            raise BaijiaAPIError(f"getPassinfo HTTP {passinfo.status_code}")
+        locked = self._request(
+            "POST",
+            LOCK_UC_LOGIN_URL,
+            data=b"",
+            headers={
+                **json_headers,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": "0",
+                "Origin": "https://baijiahao.baidu.com",
+            },
+        )
+        if not 200 <= locked.status_code < 300:
+            raise BaijiaAPIError(f"lockUcLogin HTTP {locked.status_code}")
+        login_info = self._request(
+            "GET",
+            LOGIN_INFO_URL + "?uc_login=0",
+            headers=json_headers,
+        )
+        if not 200 <= login_info.status_code < 300:
+            raise BaijiaAPIError(f"loginInfo HTTP {login_info.status_code}")
+
+    def _jsonp_url(self, base: str, pairs: list[tuple[str, str]]) -> str:
+        return base + "?" + urlencode(pairs)
 
     def start(self) -> BaijiaQRCodeChallenge:
-        """获取二维码图片并建立 CAS ``QGCSSID`` 会话。"""
+        """按浏览器字段顺序获取 Passport 二维码图片。"""
 
-        url = self._with_acs_token(CAS_QR_IMAGE_URL, self.acs_token)
-        response = self._request("GET", url, params={"t": str(int(time.time() * 1000))})
+        if self.bootstrap:
+            self._bootstrap_session()
+        now = int(time.time() * 1000)
+        pairs = [
+            ("lp", "pc"),
+            ("qrloginfrom", self.qrloginfrom),
+            ("gid", self.gid),
+            ("oauthLog", self.oauth_log),
+            ("callback", self.callback),
+            ("apiver", "v3"),
+            ("tt", str(now)),
+            ("tpl", self.product),
+            ("logPage", self.log_page),
+            ("_", str(now)),
+        ]
+        init_url = self._jsonp_url(PASSPORT_QR_INIT_URL, pairs)
+        response = self._request("GET", init_url)
         if not 200 <= response.status_code < 300:
-            raise BaijiaAPIError(f"CAS 二维码 HTTP {response.status_code}")
-        content_type = (response.headers.get("content-type") or "").split(";", 1)[0].lower()
-        if not response.content or not content_type.startswith("image/"):
-            raise BaijiaParseError("CAS 二维码响应不是图片")
-        self._started = True
-        self._last_poll = BaijiaQRCodePoll(state="waiting", errno=30002, message="qrcode inited")
-        return BaijiaQRCodeChallenge(
-            image=bytes(response.content),
-            content_type=content_type,
-            state="waiting",
-            errno=30002,
-        )
-
-    def poll(self) -> BaijiaQRCodePoll:
-        """轮询一次扫码状态；不自动重试，也不修改挑战。"""
-
-        if not self._started:
-            raise BaijiaAuthError("请先调用 BaijiaQRCodeLogin.start() 获取二维码")
-        response = self._request("POST", self._with_acs_token(CAS_QR_STATUS_URL, self.acs_token))
-        if not 200 <= response.status_code < 300:
-            raise BaijiaAPIError(f"CAS 二维码状态 HTTP {response.status_code}")
-        data = response_json(response)
+            raise BaijiaAPIError(f"Passport 二维码初始化 HTTP {response.status_code}")
+        data = self._parse_jsonp(response.text)
         try:
             errno = int(data.get("errno"))
         except (TypeError, ValueError) as exc:
-            raise BaijiaParseError("CAS 二维码状态缺少 errno") from exc
-        message = str(data.get("errmsg") or data.get("e") or "")
-        if errno == 30002:
-            state = "waiting"
-        elif errno == 30003:
+            raise BaijiaParseError("Passport 二维码响应缺少 errno") from exc
+        sign = str(data.get("sign") or "")
+        image_url = str(data.get("imgurl") or "")
+        if image_url.startswith("//"):
+            image_url = "https:" + image_url
+        elif "://" not in image_url:
+            image_url = "https://" + image_url.lstrip("/")
+        if errno != 0 or not sign or not image_url:
+            raise BaijiaAuthError(f"Passport 二维码初始化失败：errno={errno}")
+        image = self._request(
+            "GET",
+            image_url,
+            headers={"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"},
+        )
+        if not 200 <= image.status_code < 300:
+            raise BaijiaAPIError(f"Passport 二维码图片 HTTP {image.status_code}")
+        content_type = (image.headers.get("content-type") or "").split(";", 1)[0].lower()
+        if not image.content or not content_type.startswith("image/"):
+            raise BaijiaParseError("Passport 二维码响应不是图片")
+        self._sign = sign
+        self._started = True
+        self._last_poll = BaijiaQRCodePoll(state="waiting", errno=1, message="qrcode inited")
+        return BaijiaQRCodeChallenge(
+            image=bytes(image.content),
+            content_type=content_type,
+            state="waiting",
+            errno=errno,
+            sign=sign,
+            gid=self.gid,
+        )
+
+    def poll(self) -> BaijiaQRCodePoll:
+        """按浏览器 JSONP 查询一次扫码状态。"""
+
+        if not self._started or not self._sign:
+            raise BaijiaAuthError("请先调用 BaijiaQRCodeLogin.start() 获取二维码")
+        now = int(time.time() * 1000)
+        pairs = [
+            ("channel_id", self._sign),
+            ("gid", self.gid),
+            ("tpl", self.product),
+            ("_sdkFrom", "1"),
+            ("callback", self.callback),
+            ("apiver", "v3"),
+            ("tt", str(now)),
+            ("_", str(now)),
+        ]
+        response = self._request("GET", self._jsonp_url(PASSPORT_QR_POLL_URL, pairs))
+        if not 200 <= response.status_code < 300:
+            raise BaijiaAPIError(f"Passport 二维码状态 HTTP {response.status_code}")
+        data = self._parse_jsonp(response.text)
+        try:
+            errno = int(data.get("errno"))
+        except (TypeError, ValueError) as exc:
+            raise BaijiaParseError("Passport 二维码状态缺少 errno") from exc
+        message = str(data.get("errmsg") or data.get("prompt") or "")
+        channel = data.get("channel_v")
+        if isinstance(channel, str):
+            try:
+                channel = json.loads(channel)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                channel = {}
+        if isinstance(channel, dict):
+            self._channel_v = dict(channel)
+        channel_status = str(data.get("status") or data.get("channel_status") or "")
+        if channel_status == "0" and self._channel_v:
             state = "scanned"
-        elif errno == 30001:
-            state = "expired"
-        elif errno == 30004:
-            state = "invalid"
-        elif errno == 30005:
-            state = "refresh"
+        elif errno == 1:
+            state = "waiting"
         elif errno == 0:
-            state = "approved"
+            state = "scanned" if self._channel_v else "approved"
+        elif errno in {2, 3}:
+            state = "expired"
         else:
             state = "challenge"
-        result = BaijiaQRCodePoll(state=state, errno=errno, message=message)
+        result = BaijiaQRCodePoll(
+            state=state,
+            errno=errno,
+            message=message,
+            redirect_url=str(data.get("url") or data.get("redirecturl") or ""),
+            channel_status=channel_status,
+        )
         self._last_poll = result
         return result
 
-    def _login_form(self) -> dict[str, str]:
-        # 与 common-login/main.js 的 uc-qrcode-form 保持字段和取值一致。
-        return {
-            "appid": self.app_id,
-            "specialFlag": "qrcode",
-            "senderr": "1",
-            "fromu": self.fromu,
-            "selfu": self.selfu,
-            "jumppage": self.jumppage,
-            "isajax": "1",
-            "version": "2.3.0",
-        }
-
-    @staticmethod
-    def _extract_redirect(text: str) -> str:
-        if not text:
-            return ""
-        try:
-            data = json.loads(text)
-        except (TypeError, ValueError):
-            data = None
-        if isinstance(data, dict):
-            for key in ("redirecturl", "redirect_url", "url"):
-                value = data.get(key)
-                if value:
-                    return str(value)
-        # isajax 的 iframe 回调通常是 JSON；这里仅提取服务端明确返回的 URL，
-        # 不执行页面脚本，也不拼接未知参数。
-        match = re.search(r'"redirecturl"\s*:\s*"([^"]+)"', text)
-        return match.group(1) if match else ""
-
     def complete(self) -> str:
-        """用扫码确认后的 CAS 票据提交隐藏表单，返回服务端重定向地址。
-
-        只有 ``errno=0`` 才会提交。若仍是 ``waiting``/``scanned``，调用方
-        应继续轮询，让用户在百度 App 中完成确认。
-        """
+        """用扫码确认返回的 channel_v 调用 Passport QR 登录接口。"""
 
         if not self._started:
             raise BaijiaAuthError("请先调用 BaijiaQRCodeLogin.start() 获取二维码")
         current = self._last_poll or self.poll()
-        if current.state != "approved":
+        if current.state not in {"scanned", "approved"} or not self._channel_v:
             raise BaijiaAuthError(f"二维码尚未确认：errno={current.errno}")
-        response = self._request(
-            "POST",
-            self._with_acs_token(CAS_LOGIN_URL, self.acs_token),
-            data=self._login_form(),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        if response.status_code in {301, 302, 303, 307, 308}:
-            redirect = response.headers.get("location", "")
+        bduss = str(self._channel_v.get("v") or "")
+        user = str(self._channel_v.get("u") or "")
+        if not bduss:
+            raise BaijiaParseError("Passport channel_v 缺少 bduss")
+        now = int(time.time() * 1000)
+        pairs = [
+            ("v", str(now)),
+            ("bduss", bduss),
+            ("u", quote(user, safe="")),
+            ("loginVersion", "v4"),
+            ("qrcode", "1"),
+            ("tpl", self.product),
+            ("callback", self.callback),
+            ("_", str(now)),
+        ]
+        response = self._request("GET", self._jsonp_url(PASSPORT_QR_LOGIN_URL, pairs))
+        if not 200 <= response.status_code < 300:
+            raise BaijiaAPIError(f"Passport QR 登录 HTTP {response.status_code}")
+        data = self._parse_jsonp(response.text)
+        err = data.get("errInfo")
+        if isinstance(err, dict):
+            code = str(err.get("no") or "0")
+            message = str(err.get("msg") or err.get("msgDetail") or "")
         else:
-            if not 200 <= response.status_code < 300:
-                raise BaijiaAPIError(f"CAS 二维码确认 HTTP {response.status_code}")
-            redirect = self._extract_redirect(response.text)
-        if not redirect:
-            data = None
-            try:
-                data = response_json(response)
-            except BaijiaParseError:
-                pass
-            errno = data.get("errno") if isinstance(data, dict) else "unknown"
-            message = data.get("e") or data.get("errmsg") if isinstance(data, dict) else ""
-            raise BaijiaAuthError(f"CAS 二维码确认未返回重定向：errno={errno} {message}".strip())
-        return redirect
+            code = str(data.get("errno") or "0")
+            message = str(data.get("errmsg") or "")
+        if code not in {"0", "200"}:
+            raise BaijiaAuthError(f"Passport QR 登录失败：errno={code} {message}".strip())
+        return str(data.get("url") or data.get("redirecturl") or data.get("jumpUrl") or "")
 
     def cookie_header(self) -> str:
         """从当前内存会话生成 Cookie 头，不把值写入日志或文件。"""
@@ -309,7 +426,7 @@ class BaijiaQRCodeLogin:
 
         cookie = self.cookie_header()
         if not cookie:
-            raise BaijiaAuthError("CAS 已确认但会话没有返回 Cookie")
+            raise BaijiaAuthError("Passport 已确认但会话没有返回 Cookie")
         return BaijiaAuth.from_http_login(cookie=cookie, session=self.session, timeout=self.timeout)
 
     def close(self) -> None:
@@ -399,7 +516,7 @@ class BaijiaAuth:
 
     @classmethod
     def start_qrcode_login(cls, **kwargs) -> BaijiaQRCodeLogin:
-        """创建纯 HTTP CAS 二维码会话；调用方负责展示图片和提示用户扫码。"""
+        """创建纯 HTTP Passport 二维码会话；调用方负责展示图片和提示用户扫码。"""
 
         return BaijiaQRCodeLogin(**kwargs)
 
@@ -435,7 +552,7 @@ class BaijiaAuth:
         if headers:
             request_headers.update(headers)
         kwargs.setdefault("timeout", self.timeout)
-        kwargs.setdefault("impersonate", "chrome101")
+        kwargs.setdefault("impersonate", "chrome150")
         # Cookie 与开放接口 token 不应跟随平台跳转，避免把登录页当作接口成功。
         if (self.cookie and use_cookie) or method.upper() != "GET":
             kwargs.setdefault("allow_redirects", False)

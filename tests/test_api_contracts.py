@@ -12,7 +12,7 @@ from baijia_apis import (
     BaijiaSearchAPI,
     BaijiaSearchBlocked,
 )
-from baijia_apis.auth import parse_cookies
+from baijia_apis.auth import parse_cookie_pairs, parse_cookies
 from baijia_apis.content import parse_jsonp
 
 
@@ -40,6 +40,45 @@ class FakeSession:
 
 
 class AuthTests(unittest.TestCase):
+    def test_from_cookie_preserves_order_accepts_mapping_and_scopes_cookie(self):
+        self.assertEqual(
+            parse_cookie_pairs("RECENT_LOGIN=first; X=1; RECENT_LOGIN=second"),
+            [("RECENT_LOGIN", "first"), ("X", "1"), ("RECENT_LOGIN", "second")],
+        )
+        session = FakeSession(FakeResponse(data={"errno": 0}))
+        auth = BaijiaAuth.from_cookie({"A": "1", "B": "2"}, session=session)
+        self.assertEqual(auth.cookie_header, "A=1; B=2")
+        auth.request("GET", "https://baijiahao.baidu.com/builder/app/appinfo")
+        self.assertEqual(session.calls[0][2]["headers"]["Cookie"], "A=1; B=2")
+        self.assertEqual(auth.cookie_header_for_url("https://mbd.baidu.com/webpage"), "A=1; B=2")
+        self.assertEqual(auth.cookie_header_for_url("https://www.baidu.com/s"), "")
+
+    def test_login_response_rotates_token_and_cookie_without_logging_values(self):
+        session = FakeSession(
+            FakeResponse(
+                data={"errno": 0},
+                headers={"token": "rotated-token", "Set-Cookie": "BJH=rotated; Path=/"},
+            ),
+            FakeResponse(data={"errno": 0}),
+        )
+        auth = BaijiaAuth.from_cookie("A=old; A=old-duplicate", session=session)
+        auth.login_state()
+        self.assertEqual(auth.creator_token, "rotated-token")
+        self.assertEqual(auth.cookie, "A=old; A=old-duplicate; BJH=rotated")
+        auth.request("GET", "https://baijiahao.baidu.com/pcui/menu/auth")
+        self.assertEqual(session.calls[1][2]["headers"]["token"], "rotated-token")
+        snapshot = auth.state_snapshot()
+        self.assertNotIn("rotated-token", repr(snapshot))
+        self.assertEqual(snapshot["cookie_names"], ["A", "A", "BJH"])
+
+    def test_expired_set_cookie_is_removed_from_follow_up_header(self):
+        session = FakeSession(FakeResponse(
+            data={"errno": 0},
+            headers={"Set-Cookie": "A=; Max-Age=0; Path=/"},
+        ))
+        auth = BaijiaAuth.from_cookie("A=old; B=keep", session=session)
+        auth.login_state()
+        self.assertEqual(auth.cookie, "B=keep")
     def test_cookie_parser_and_login_probe(self):
         self.assertEqual(parse_cookies("BAIDUID=a=b; Hmery-Time=123"), {"BAIDUID": "a=b", "Hmery-Time": "123"})
         session = FakeSession(FakeResponse(data={"errno": 10001401, "data": None}))

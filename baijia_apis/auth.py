@@ -7,10 +7,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode, urlparse
 
@@ -18,6 +20,7 @@ from curl_cffi import requests
 
 
 APPINFO_URL = "https://baijiahao.baidu.com/builder/app/appinfo"
+CREATOR_HOME_URL = "https://baijiahao.baidu.com/builder/rc/home"
 BAIJIA_LOGIN_PAGE = "https://baijiahao.baidu.com/builder/theme/bjh/login"
 ALLOC_TK_URL = "https://baijiahao.baidu.com/user-ui/cms/allocTk"
 GET_PASSINFO_URL = "https://baijiahao.baidu.com/user-ui/cms/getPassinfo"
@@ -92,6 +95,40 @@ def parse_cookies(cookie_header: str) -> dict[str, str]:
         if sep and name:
             result[name] = value
     return result
+
+
+def parse_cookie_pairs(cookie_header: str) -> list[tuple[str, str]]:
+    """保留浏览器 Cookie 头的到达顺序和重复字段。
+
+    ``dict`` 视图仍由 :func:`parse_cookies` 提供给旧调用方；请求线序则
+    使用这里的 pair 列表，避免把 Chrome 复制出来的重复 Cookie 折叠掉。
+    """
+
+    if "\r" in cookie_header or "\n" in cookie_header:
+        raise ValueError("Cookie 不能包含换行符")
+    pairs: list[tuple[str, str]] = []
+    for part in cookie_header.split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and name:
+            pairs.append((name, value))
+    return pairs
+
+
+def _cookie_header_text(cookie: str | Mapping[str, str]) -> str:
+    """标准化 Network 复制的 Cookie 头或有序 mapping。"""
+
+    if isinstance(cookie, Mapping):
+        parts = []
+        for name, value in cookie.items():
+            name = str(name).strip()
+            value = str(value)
+            if not name or "\r" in name or "\n" in name or "\r" in value or "\n" in value:
+                raise ValueError("Cookie 名称和值不能包含换行符或空名称")
+            parts.append(f"{name}={value}")
+        return "; ".join(parts)
+    if not isinstance(cookie, str):
+        raise TypeError("cookie 必须是 Network Cookie 字符串或 mapping")
+    return cookie
 
 
 def response_json(response) -> dict:
@@ -442,7 +479,12 @@ class BaijiaQRCodeLogin:
         if jar is None:
             return ""
         if hasattr(jar, "get_dict"):
-            values = jar.get_dict()
+            # to_auth() 只请求百家号 Creator；不要把 Passport 其它域的同名
+            # Cookie 全局压平后再发给 builder。
+            try:
+                values = jar.get_dict(domain="baijiahao.baidu.com")
+            except (TypeError, ValueError):
+                values = jar.get_dict()
         elif isinstance(jar, dict):
             values = jar
         else:
@@ -476,15 +518,21 @@ class BaijiaQRCodeLogin:
 class BaijiaAuth:
     """管理 Cookie、Creator token 或开放接口的 App ID / Token。"""
 
+    # Network 复制的 Cookie 没有携带 Domain/Path 元数据。保留旧动态接口
+    # 所需的 mbd.baidu.com 共享 Cookie；www.baidu.com 搜索仍由调用方显式
+    # 传入 Cookie 并在 SearchAPI 中 use_cookie=False。
+    _SHARED_COOKIE_HOSTS = frozenset({"mbd.baidu.com"})
+
     def __init__(
         self,
         *,
-        cookie: str = "",
+        cookie: str | Mapping[str, str] = "",
         creator_token: str = "",
         app_id: str = "",
         app_token: str = "",
         session=None,
         timeout: float = 20,
+        cookie_source_url: str = APPINFO_URL,
     ):
         if timeout <= 0:
             raise ValueError("timeout 必须大于 0")
@@ -493,7 +541,15 @@ class BaijiaAuth:
                 raise ValueError(f"{label} 不能包含换行符")
         if app_token and not app_id:
             raise ValueError("app_token 需要对应的 app_id")
-        self.cookie = cookie.strip()
+        self.cookie_source_url = cookie_source_url
+        source = urlparse(cookie_source_url)
+        if source.scheme != "https" or not source.hostname or not (
+            source.hostname == "baidu.com" or source.hostname.endswith(".baidu.com")
+        ):
+            raise ValueError("cookie_source_url 必须是 HTTPS 百度域名")
+        self.cookie_source_host = source.hostname.lower()
+        self.cookie = _cookie_header_text(cookie).strip()
+        self._cookie_pairs = parse_cookie_pairs(self.cookie)
         self.cookies = parse_cookies(self.cookie)
         self.creator_token = creator_token.strip()
         self.app_id = app_id.strip()
@@ -501,18 +557,143 @@ class BaijiaAuth:
         self.timeout = timeout
         self.session = session if session is not None else requests.Session()
         self._owns_session = session is None
+        self._seed_cookie_jar()
+
+    def _seed_cookie_jar(self) -> None:
+        """把 Cookie 写入 curl_cffi Jar，同时保留显式线序作为权威视图。"""
+
+        jar = getattr(self.session, "cookies", None)
+        setter = getattr(jar, "set", None)
+        if not callable(setter):
+            return
+        # The explicit Cookie header remains authoritative because a pasted
+        # browser header can contain duplicate names with different scopes.
+        # The Jar is still useful for redirects and endpoints that add a
+        # Set-Cookie value after construction.
+        for name, value in self._cookie_pairs:
+            try:
+                setter(name, value, domain=self.cookie_source_host, path="/")
+            except (TypeError, ValueError):
+                break
+
+    @property
+    def cookie_str(self) -> str:
+        """与 XHS/Douyin Auth 对齐的 Cookie 字符串别名。"""
+
+        return self.cookie
+
+    @property
+    def cookie_header(self) -> str:
+        """返回应复制到同源 HTTP 请求的完整 Cookie 头。"""
+
+        return self.cookie
+
+    def cookie_header_for_url(self, url: str) -> str:
+        """按来源主机范围返回 Cookie，避免误发给百度其它子域。"""
+
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        source = self.cookie_source_host
+        if host == source or host.endswith("." + source) or host in self._SHARED_COOKIE_HOSTS:
+            return self.cookie
+        return ""
+
+    @staticmethod
+    def _response_cookie_pairs(response) -> list[tuple[str, str, bool]]:
+        """仅读取本次响应新增的 Set-Cookie，不扫描整个 Session Jar。"""
+
+        pairs: list[tuple[str, str, bool]] = []
+        jar = getattr(response, "cookies", None)
+        getter = getattr(jar, "get_dict", None)
+        if callable(getter):
+            try:
+                pairs.extend((str(name), str(value), False) for name, value in getter().items())
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(jar, Mapping):
+            pairs.extend((str(name), str(value), False) for name, value in jar.items())
+
+        headers = getattr(response, "headers", {}) or {}
+        values = []
+        getlist = getattr(headers, "get_list", None)
+        if callable(getlist):
+            try:
+                values = list(getlist("set-cookie"))
+            except (TypeError, ValueError):
+                values = []
+        if not values:
+            raw = headers.get("set-cookie") or headers.get("Set-Cookie")
+            if raw:
+                values = [raw]
+        for value in values:
+            pieces = str(value).split(";")
+            name, sep, cookie_value = pieces[0].partition("=")
+            if sep and name.strip():
+                expired = False
+                for attribute in pieces[1:]:
+                    key, attr_sep, attr_value = attribute.strip().partition("=")
+                    if key.lower() == "max-age" and attr_sep:
+                        try:
+                            expired = int(attr_value.strip()) <= 0
+                        except ValueError:
+                            pass
+                pairs.append((name.strip(), cookie_value, expired))
+        return pairs
+
+    def _absorb_response_auth(self, response) -> None:
+        """吸收浏览器同样会接收的 token 与 Set-Cookie 更新。"""
+
+        headers = getattr(response, "headers", {}) or {}
+        token = headers.get("token") or headers.get("Token")
+        if token:
+            self.creator_token = str(token)
+        # curl_cffi 会自动更新其 Jar；把本次响应的新字段同步到显式 Cookie
+        # 线序，后续请求不会继续发送已经淘汰的旧值。
+        for name, value, expired in self._response_cookie_pairs(response):
+            if expired:
+                self._cookie_pairs = [(n, v) for n, v in self._cookie_pairs if n != name]
+                continue
+            if any(n == name for n, _ in self._cookie_pairs):
+                self._cookie_pairs = [
+                    (n, value if n == name else v) for n, v in self._cookie_pairs
+                ]
+            else:
+                self._cookie_pairs.append((name, value))
+        self.cookie = "; ".join(f"{name}={value}" for name, value in self._cookie_pairs)
+        self.cookies = parse_cookies(self.cookie)
+
+    def state_snapshot(self) -> dict[str, object]:
+        """返回可落盘的脱敏状态，绝不包含 Cookie/token 原文。"""
+
+        return {
+            "cookie_source_host": self.cookie_source_host,
+            "cookie_names": [name for name, _ in self._cookie_pairs],
+            "cookie_lengths": [len(value) for _, value in self._cookie_pairs],
+            "cookie_hashes": [hashlib.sha256(value.encode()).hexdigest()[:12] for _, value in self._cookie_pairs],
+            "creator_token_length": len(self.creator_token),
+            "has_creator_token": bool(self.creator_token),
+            "has_partner_token": bool(self.app_id and self.app_token),
+        }
 
     @classmethod
-    def from_cookie(cls, cookie: str, **kwargs) -> "BaijiaAuth":
-        if not parse_cookies(cookie):
+    def from_cookie(cls, cookie: str | Mapping[str, str], *, validate: bool = False, **kwargs) -> "BaijiaAuth":
+        cookie_text = _cookie_header_text(cookie)
+        if not parse_cookies(cookie_text):
             raise BaijiaAuthError("需要有效的 Cookie 字符串")
-        return cls(cookie=cookie, **kwargs)
+        auth = cls(cookie=cookie_text, **kwargs)
+        if validate:
+            try:
+                auth.require_logged_in()
+            except Exception:
+                auth.close()
+                raise
+        return auth
 
     @classmethod
     def from_http_login(
         cls,
         *,
-        cookie: str,
+        cookie: str | Mapping[str, str],
         creator_token: str = "",
         app_id: str = "",
         app_token: str = "",
@@ -581,7 +762,12 @@ class BaijiaAuth:
             raise ValueError("只允许请求 HTTPS 百度域名")
         request_headers = {"User-Agent": USER_AGENT}
         if use_cookie and self.cookie:
-            request_headers["Cookie"] = self.cookie
+            cookie_header = self.cookie_header_for_url(url)
+            if cookie_header:
+                request_headers["Cookie"] = cookie_header
+        if use_cookie and self.creator_token and parsed.path.startswith(("/builder/", "/pcui/", "/user-ui/")):
+            if not any(str(name).lower() == "token" for name in request_headers):
+                request_headers["token"] = self.creator_token
         if headers:
             request_headers.update(headers)
         kwargs.setdefault("timeout", self.timeout)
@@ -590,6 +776,7 @@ class BaijiaAuth:
         if (self.cookie and use_cookie) or method.upper() != "GET":
             kwargs.setdefault("allow_redirects", False)
         response = self.session.request(method.upper(), url, headers=request_headers, **kwargs)
+        self._absorb_response_auth(response)
         if not 200 <= response.status_code < 300:
             raise BaijiaAPIError(f"HTTP {response.status_code}: {parsed.path}")
         return response
@@ -598,7 +785,14 @@ class BaijiaAuth:
         """查询 Creator 后台会话；无凭据时返回平台登录错误码。"""
         if not self.cookie:
             raise BaijiaAuthError("未配置 Cookie")
-        return response_json(self.request("GET", APPINFO_URL, headers={"Referer": "https://baijiahao.baidu.com/"}))
+        return response_json(self.request(
+            "GET",
+            APPINFO_URL,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": CREATOR_HOME_URL,
+            },
+        ))
 
     def is_logged_in(self) -> bool:
         return str(self.login_state().get("errno")) == "0"

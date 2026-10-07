@@ -7,7 +7,7 @@
 | 能力 | 入口 | 当前状态 |
 | --- | --- | --- |
 | Cookie 会话校验 | `BaijiaAuth.from_http_login()`、`from_cookie()`、`require_logged_in()` | `GET /builder/app/appinfo` 的 HTTP JSON 契约已实现；调用方必须提供完整 Cookie 请求头 |
-| 二维码登录 | `BaijiaAuth.from_qrcode_login()`、`BaijiaQRCodeLogin` | CAS 二维码取图、`qrget` 轮询和确认表单均为纯 HTTP；扫码由百度 App 完成，库只返回挑战状态 |
+| 二维码登录 | `BaijiaAuth.from_qrcode_login()`、`BaijiaQRCodeLogin` | Passport 二维码取图、`channel/unicast` 轮询和确认接口均为纯 HTTP；扫码由百度 App 完成，库只返回挑战状态 |
 | 短信、图片验证码和滑块 | `from_http_login()` / challenge 状态 | Passport 安全控件和验证码由百度服务端完成；未猜测动态签名，也不绕过挑战 |
 | 公开文章 Item | `BaijiaContentAPI.get_article()` | 匿名 HTTP GET 解析标题、作者、更新时间和正文 |
 | 全站文章搜索 | `BaijiaSearchAPI.search_articles()` | 百度网页搜索 `site:` 结果解析；遇安全验证抛 `BaijiaSearchBlocked` |
@@ -47,6 +47,8 @@ with BaijiaAuth.from_http_login(
 
 `from_http_login()` 只做一次 `GET https://baijiahao.baidu.com/builder/app/appinfo` 校验；`errno` 不是 `0` 时抛 `BaijiaAuthError`。Cookie 必须包含该请求真正需要的 HttpOnly 字段；`document.cookie` 的值可能不完整。`BaijiaAuth.request()` 限制在 HTTPS 百度域名，带 Cookie 或写请求默认不跟随重定向。
 
+手机号验证码或扫码在官方页面完成后，直接从同一百家号请求的 Network > Request Headers > Cookie 复制完整值，交给 `from_cookie()`；不要用 `document.cookie` 代替。`from_cookie()` 不自动发网络请求，保留浏览器 Cookie 的字段顺序和重复字段，并接受 `dict`/有序 mapping。首次调用 `require_logged_in()` 后，百家号响应的 `token` 会自动写回同一个 Auth，后续 `BaijiaCreatorAPI` 请求继续复用同一个 Session。响应新增的 `Set-Cookie` 也会合并到后续请求。`mbd.baidu.com` 动态接口保留共享 Cookie；`www.baidu.com` 搜索 Cookie 仍通过 `baidu_cookie` 显式传入。
+
 ```python
 # 已有 Cookie 但暂时不想立即请求时使用
 auth = BaijiaAuth.from_cookie(os.environ["BAIDU_COOKIES"])
@@ -55,6 +57,8 @@ try:
 finally:
     auth.close()
 ```
+
+需要审计会话而不输出敏感值时可使用 `auth.state_snapshot()`；它只返回 Cookie 名称、值长度、值哈希前缀和 token 是否存在。
 
 ### 纯 HTTP 二维码登录
 

@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | Cookie 登录会话 | `BaijiaAuth.from_browser_login()`、`from_qrcode_login()`、`from_cookie()`、`require_logged_in()` | 当前 Chrome 使用手机号登录后，同源只读 GET `builder/app/appinfo` 已实测 HTTP 200、`errno=0` 且返回 `data.user`。独立 Playwright 新窗口登录流程尚未实测。 |
 | 本人网页作品列表 | `BaijiaCreatorAPI.list_web_works()` | 当前登录会话的 `GET pcui/article/lists` 已实测 HTTP 200、`errno=0`，无需伙伴 App Token；全部、图文、图文草稿视图与分页参数已核对。当前账号列表为空。库中独立 Cookie 请求尚未实测。 |
+| 网页图文草稿 | `BaijiaCreatorAPI.save_web_draft()` | 当前 Chrome 官方编辑器“存草稿”已实测 `POST pcui/article/save?callback=bjhdraft`：表单提交，使用 Cookie 与 Creator `token` 头，返回 `ret.article_id`；草稿列表出现后已删除并复核为空。库中独立 HTTP 调用尚未实测。 |
 | 作者资料、动态、互动数据 | `BaijiaContentAPI.get_user_info/get_user_posts/get_item_metrics` | 公开作者主页已匿名 GET 实测；动态和互动沿用旧仓库的 `mbd.baidu.com/webpage` JSONP 契约，新增解析和请求契约测试，尚未用有效账号回放。 |
 | 公开文章 Item | `BaijiaContentAPI.get_article()` | 已对公开 `baijiahao.baidu.com/s?id=...` 页面做匿名 GET 实测，解析标题、作者、更新时间与正文。HTML 结构变化可能需要更新解析器。 |
 | 指定作者内容搜索 | `BaijiaSearchAPI.search_user_posts()` | 逐页读取作者动态，按文字在本地筛选。依赖上述动态接口。 |
@@ -109,6 +110,25 @@ with BaijiaAuth.from_browser_login() as auth:
 
 上述浏览器会话 API 路由已在当前 Chrome 中验证；独立 Playwright 登录及 `curl_cffi` 使用同一 Cookie 调用此路由尚未做账号实测。
 
+### 网页图文草稿
+
+已在本人登录的官方编辑器中用中性测试内容点击一次“存草稿”：`POST /pcui/article/save?callback=bjhdraft`，请求为 URL 编码表单，携带 Cookie 与 Creator `token` 头；响应 `errno=0`，`ret.article_id` 为数字 ID。该 ID 随后出现在图文草稿列表。删除入口 `POST /pcui/article/remove` 返回 `errno=0`，再次查询草稿列表为 0。没有点击公开“发布”。`save_web_draft()` 仅封装已观察的新增草稿请求，不接受伙伴 App Token 代替 Creator token。
+
+```python
+import os
+from baijia_apis import BaijiaAuth, BaijiaCreatorAPI
+
+with BaijiaAuth.from_cookie(
+    os.environ["BAIDU_COOKIES"], creator_token=os.environ["BAIJIA_CREATOR_TOKEN"]
+) as auth:
+    creator = BaijiaCreatorAPI(auth)
+    # 显式调用后会在本人账号创建草稿；不要对未知结果直接重试。
+    # draft = creator.save_web_draft("测试草稿标题", "<p>测试正文</p>")
+    pass
+```
+
+网页实测请求还含当前账号页面给出的活动列表及选中状态；方法可用 `activities=[("活动 ID", True), ...]` 传入。默认省略活动字段尚未通过真实账号回放。`from_browser_login()` 只返回 Cookie，不提取 Creator token；调用草稿方法前需从本人 Creator 会话取得该 token 并只保存在本机内存。`save_web_draft()` 要求标题 2–64 字、非空 HTML 正文。此次样本 `len=29`，与提交的 HTML 29 字符相符；纯文本为 22 字、UTF-8 为 73 字节。方法按 Python HTML 字符数填 `len`；非 BMP 字符（如 emoji）的长度规则尚未实测，因此在提交前拒绝。若平台报告 `errno=0` 却没有 `ret.article_id`，先查草稿列表，勿直接重试。当前尚未用 `curl_cffi` 复现真实草稿提交。
+
 ## 图文发布
 
 百家号开放接口需账号获得 App ID / App Token。**浏览器登录 Cookie 可读取本人网页作品列表，但不能代替 App Token 调用此处的 `publish_article()` 或 `query_article_status()`。**封面传 HTTPS 图片 URL；如需把本地图片上传到 Creator 素材库，可使用 `upload_image()`，它另需 Cookie 和 Creator token。两类身份材料在同一个 `BaijiaAuth` 中可同时提供；对来源不同的 App ID，请分别构建会话并按账号资料核对。
@@ -143,9 +163,9 @@ with BaijiaAuth.from_partner_token(
 3. 准备一篇测试文章、本人可控且唯一的 `origin_url`，以及符合尺寸要求的封面。明确调用一次 `publish_article()`，保存返回的 `data.article_id`，再用 `query_article_status(article_id)` 确认审核/发布状态与可访问 URL。无封面加 `allow_draft=True` 只验草稿提交，公开发布仍需单独有封面的实测；公开 SDK 提醒草稿也占用当日发文次数。
 4. 如需本地图片链路，再从本人 Creator 请求核对初始 `token` 与 `app_id`，先用 `refresh_creator_token()` 验证 HEAD 响应，然后上传一张测试 JPEG/PNG 并确认返回 HTTPS URL。此步骤会写入账号素材库。
 
-当前 Chrome 的手机号登录校验只证明该浏览器已有有效账号会话；独立 Playwright 登录辅助、发布和上传仍需按第 1–4 步验收。登录辅助依赖官方页面交互，没有模拟短信或扫码回调，也没有网页后台文章发布请求的已核实契约。
+当前 Chrome 的手机号登录校验只证明该浏览器已有有效账号会话；独立 Playwright 登录辅助、开放接口发布和上传仍需按第 1–4 步验收。登录辅助依赖官方页面交互，没有模拟短信或扫码回调。网页草稿保存已有一次真实操作样本；网页公开发布仍没有请求契约。
 
-网页图文编辑器已观察到 `/builder/rc/edit?type=news&is_from_cms=1`，页面含标题、正文、封面，以及“存草稿”“预览”“定时发布”“发布”按钮。打开空白编辑器后未触发草稿或发布请求；没有填写或提交内容。当前账号的作品/草稿列表均为空，故没有编辑既有作品的样本。`GET /pcui/article/edit?type=news` 路由曾由页面请求，但未取得可复用的请求契约；本仓库未添加基于 Cookie 的草稿保存或网页发布方法。要确认这两步，需要在本人账号中显式创建测试草稿/作品并核对请求和返回状态。
+网页图文编辑器路由为 `/builder/rc/edit?type=news&is_from_cms=1`，页面含标题、正文、封面，以及“存草稿”“预览”“定时发布”“发布”按钮。一次中性测试草稿的保存和删除已完成；当前账号草稿列表恢复为 0。`GET /pcui/article/edit?type=news` 路由曾由页面请求，但未取得可复用的详情请求契约；本仓库没有网页公开发布方法。要确认公开发布，仍需本人明确准备测试作品并触发一次“发布”，核对写请求、审核状态及作品 URL。
 
 ## 旧版兼容
 
@@ -167,7 +187,7 @@ api = BaiduApis()
 python -m unittest discover -s tests -v
 ```
 
-离线测试验证浏览器登录辅助与兼容别名的成功/超时/校验失败路径、本人网页作品列表的请求参数、Cookie 处理、登录态预检、跳转处理、请求 URL/参数/Body、JSONP 解析、分页游标、公开 Item 解析及发布/上传请求契约。测试会模拟浏览器，不启动真实 Chrome。当前 Chrome 手机号登录态与网页作品列表路由已实测；独立 Playwright 登录、发布、上传和全站搜索尚未完成真实账号端到端验证。
+离线测试验证浏览器登录辅助与兼容别名的成功/超时/校验失败路径、本人网页作品列表和网页草稿的请求参数、Cookie 处理、登录态预检、跳转处理、请求 URL/参数/Body、JSONP 解析、分页游标、公开 Item 解析及发布/上传请求契约。测试会模拟浏览器，不启动真实 Chrome。当前 Chrome 手机号登录态、网页作品列表路由和一次草稿保存/删除已实测；独立 Playwright 登录、库内草稿 HTTP 调用、公开发布、上传和全站搜索尚未完成真实账号端到端验证。
 
 ## 端点依据
 

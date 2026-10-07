@@ -13,8 +13,10 @@ from .auth import BaijiaAuth, BaijiaAPIError, BaijiaAuthError, BaijiaParseError,
 
 OPEN_BASE = "https://baijiahao.baidu.com/builderinner/open/resource"
 WEB_LIST_URL = "https://baijiahao.baidu.com/pcui/article/lists"
+WEB_SAVE_URL = "https://baijiahao.baidu.com/pcui/article/save"
 UPLOAD_URL = "https://baijiahao.baidu.com/pcui/picture/uploadproxy"
 CREATOR_REFERER = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
+WEB_EDITOR_REFERER = "https://baijiahao.baidu.com/builder/rc/edit?type=news&is_from_cms=1"
 CONTENT_REFERER = "https://baijiahao.baidu.com/builder/rc/content"
 
 
@@ -56,6 +58,10 @@ class BaijiaCreatorAPI:
         if not self.auth.cookie or not self.auth.creator_token or not self.auth.app_id:
             raise BaijiaAuthError("图片上传需要 Cookie、Creator token 和 App ID")
 
+    def _require_web_editor(self) -> None:
+        if not self.auth.cookie or not self.auth.creator_token:
+            raise BaijiaAuthError("网页草稿需要 Cookie 和 Creator token")
+
     def list_web_works(self, *, page: int = 1, view: str = "all") -> dict:
         """读取当前登录账号的作品列表；无需开放接口 App Token。
 
@@ -86,6 +92,73 @@ class BaijiaCreatorAPI:
         data = result.get("data")
         if not isinstance(data, dict) or not isinstance(data.get("list"), list) or not isinstance(data.get("page"), dict):
             raise BaijiaParseError("Web 作品列表缺少 data.list 或 data.page")
+        return result
+
+    def save_web_draft(
+        self,
+        title: str,
+        content_html: str,
+        *,
+        activities: Iterable[tuple[str, bool]] = (),
+    ) -> dict:
+        """按已观察的网页编辑器请求新建图文草稿，返回平台响应。
+
+        activities 是当前页面展示的活动 ID 与是否选中；不提供时不发送活动字段。
+        本方法只调用 callback=bjhdraft，不调用公开发布端点。
+        """
+        self._require_web_editor()
+        title = title.strip()
+        if not 2 <= len(title) <= 64:
+            raise ValueError("草稿标题需为 2–64 字")
+        if not content_html.strip():
+            raise ValueError("草稿正文不能为空")
+        if "\r" in title or "\n" in title:
+            raise ValueError("草稿标题不能包含换行符")
+        if any(ord(char) > 0xFFFF for char in title + content_html):
+            raise ValueError("emoji 等非 BMP 字符的草稿长度规则尚未验证")
+        fields = {
+            "type": "news",
+            "title": title,
+            "content": content_html,
+            "len": str(len(content_html)),
+            "source_reprinted_allow": "0",
+            "abstract_from": "1",
+            "isBeautify": "false",
+            "usingImgFilter": "false",
+            "first_exclusive_publish_v2": "3",
+            "subtitle": "",
+            "bjhtopic_id": "",
+            "bjhtopic_info": "",
+        }
+        if isinstance(activities, (str, bytes)):
+            raise ValueError("activities 应为 (活动 ID, 是否选中) 列表")
+        for index, activity in enumerate(activities):
+            try:
+                activity_id, checked = activity
+            except (TypeError, ValueError):
+                raise ValueError("每项活动应为 (活动 ID, bool)") from None
+            if not isinstance(activity_id, str) or not activity_id.strip() or any(c in activity_id for c in "\r\n;="):
+                raise ValueError("活动 ID 格式无效")
+            if not isinstance(checked, bool):
+                raise ValueError("活动选中状态必须是 bool")
+            fields[f"activity_list[{index}][id]"] = activity_id
+            fields[f"activity_list[{index}][is_checked]"] = "1" if checked else "0"
+        response = self.auth.request(
+            "POST", WEB_SAVE_URL, params={"callback": "bjhdraft"}, data=fields,
+            headers={
+                "token": self.auth.creator_token,
+                "Referer": WEB_EDITOR_REFERER,
+                "Origin": "https://baijiahao.baidu.com",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        result = response_json(response)
+        if str(result.get("errno")) != "0":
+            raise BaijiaAPIError(f"Web 草稿保存失败：errno={result.get('errno')}")
+        ret = result.get("ret")
+        article_id = ret.get("article_id") if isinstance(ret, dict) else None
+        if not str(article_id or "").isascii() or not str(article_id or "").isdigit():
+            raise BaijiaParseError("草稿请求可能已成功，但缺少 ret.article_id；请先检查草稿列表，勿直接重试")
         return result
 
     def upload_image(self, path_or_bytes, *, filename: str | None = None) -> str:

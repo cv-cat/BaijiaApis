@@ -187,6 +187,55 @@ class CreatorTests(unittest.TestCase):
         with self.assertRaises(BaijiaParseError):
             api.list_web_works()
 
+    def test_web_draft_form_contract_and_article_id(self):
+        session = FakeSession(FakeResponse(data={"errno": 0, "ret": {"article_id": "123", "id": "123"}}))
+        auth = BaijiaAuth.from_cookie("BAIDUID=mine", creator_token="creator-token", session=session)
+        result = BaijiaCreatorAPI(auth).save_web_draft(
+            "临时草稿标题", "<p>测试正文</p>", activities=[("campaign-one", True), ("campaign-two", False)],
+        )
+        self.assertEqual(result["ret"]["article_id"], "123")
+        method, url, kwargs = session.calls[0]
+        self.assertEqual((method, url), ("POST", "https://baijiahao.baidu.com/pcui/article/save"))
+        self.assertEqual(kwargs["params"], {"callback": "bjhdraft"})
+        self.assertEqual(kwargs["headers"]["Cookie"], "BAIDUID=mine")
+        self.assertEqual(kwargs["headers"]["token"], "creator-token")
+        self.assertEqual(kwargs["headers"]["Referer"], "https://baijiahao.baidu.com/builder/rc/edit?type=news&is_from_cms=1")
+        self.assertEqual(kwargs["headers"]["Origin"], "https://baijiahao.baidu.com")
+        self.assertEqual(kwargs["headers"]["Content-Type"], "application/x-www-form-urlencoded")
+        self.assertIs(kwargs["allow_redirects"], False)
+        self.assertEqual(kwargs["data"], {
+            "type": "news", "title": "临时草稿标题", "content": "<p>测试正文</p>",
+            "len": str(len("<p>测试正文</p>")),
+            "source_reprinted_allow": "0", "abstract_from": "1",
+            "isBeautify": "false", "usingImgFilter": "false",
+            "first_exclusive_publish_v2": "3", "subtitle": "", "bjhtopic_id": "", "bjhtopic_info": "",
+            "activity_list[0][id]": "campaign-one", "activity_list[0][is_checked]": "1",
+            "activity_list[1][id]": "campaign-two", "activity_list[1][is_checked]": "0",
+        })
+        self.assertNotIn("app_token", kwargs["data"])
+
+    def test_web_draft_requires_auth_and_never_retries_ambiguous_response(self):
+        empty = BaijiaCreatorAPI(BaijiaAuth(session=FakeSession()))
+        with self.assertRaises(BaijiaAuthError):
+            empty.save_web_draft("临时草稿", "<p>正文</p>")
+        session = FakeSession(
+            FakeResponse(data={"errno": 10001401}),
+            FakeResponse(data={"errno": 0, "ret": {}}),
+        )
+        auth = BaijiaAuth.from_cookie("BAIDUID=mine", creator_token="creator-token", session=session)
+        api = BaijiaCreatorAPI(auth)
+        for title, content in (("短", "<p>正文</p>"), ("临时草稿", ""), ("临时\n草稿", "正文"), ("临时草稿", "<p>🙂</p>")):
+            with self.assertRaises(ValueError):
+                api.save_web_draft(title, content)
+        with self.assertRaises(ValueError):
+            api.save_web_draft("临时草稿", "正文", activities=[("id", "yes")])
+        self.assertEqual(session.calls, [])
+        with self.assertRaisesRegex(BaijiaAPIError, "10001401"):
+            api.save_web_draft("临时草稿", "<p>正文</p>")
+        with self.assertRaisesRegex(BaijiaParseError, "勿直接重试"):
+            api.save_web_draft("临时草稿", "<p>正文</p>")
+        self.assertEqual(len(session.calls), 2)
+
     def test_partner_publish_body_and_status_contract(self):
         session = FakeSession(
             FakeResponse(data={"errno": 0, "data": {"article_id": "123"}}),

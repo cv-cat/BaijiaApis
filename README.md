@@ -10,9 +10,9 @@
 | 本人网页作品列表 | `BaijiaCreatorAPI.list_web_works()` | 当前登录会话的 `GET pcui/article/lists` 已实测 HTTP 200、`errno=0`，无需伙伴 App Token；全部、图文、图文草稿视图与分页参数已核对。当前账号列表为空。库中独立 Cookie 请求尚未实测。 |
 | 网页图文草稿 | `BaijiaCreatorAPI.save_web_draft()`、`delete_web_draft()` | 当前 Chrome 官方编辑器已实测保存与删除临时草稿：均用 Cookie 与 Creator `token` 头；删除后草稿列表为空。库中独立 HTTP 调用尚未实测。 |
 | 作者资料、动态、互动数据 | `BaijiaContentAPI.get_user_info/get_user_posts/get_item_metrics` | 公开作者主页已匿名 GET 实测；动态和互动沿用旧仓库的 `mbd.baidu.com/webpage` JSONP 契约，新增解析和请求契约测试，尚未用有效账号回放。 |
-| 公开文章 Item | `BaijiaContentAPI.get_article()` | 已对公开 `baijiahao.baidu.com/s?id=...` 页面做匿名 GET 实测，解析标题、作者、更新时间与正文。HTML 结构变化可能需要更新解析器。 |
+| 公开文章 Item | `BaijiaContentAPI.get_article()` | 已对公开 `baijiahao.baidu.com/s?id=...` 页面做匿名 GET 实测，解析标题、作者、更新时间与正文；登录闭环中也用百家号 Cookie 读回首篇 2491 字正文。HTML 结构变化可能需要更新解析器。 |
 | 指定作者内容搜索 | `BaijiaSearchAPI.search_user_posts()` | 逐页读取作者动态，按文字在本地筛选。依赖上述动态接口。 |
-| 全站文章搜索 | `BaijiaSearchAPI.search_articles()` | 使用百度网页搜索的 `site:` 条件。已按实际结果卡片的 `mu` 文章直链解析，库中匿名搜索“咖啡”返回 9 篇，第一篇接续 `get_article()` 取到正文；当前 Chrome 登录会话也可浏览同一搜索结果与 Item。重复请求可能收到“百度安全验证”，此时抛 `BaijiaSearchBlocked`；一次携带已登录 Cookie 的库中连贯验收即遇到该验证，因此不能宣称登录→搜索→Item 的 Python E2E 稳定通过。它不是百家号站内私有 API。 |
+| 全站文章搜索 | `BaijiaSearchAPI.search_articles()` | 使用百度网页搜索的 `site:` 条件，按结果卡片 `mu` 解析文章直链。**同一 Python 进程的 `require_logged_in() → search_articles('咖啡') → get_article()` 已在线通过**：登录 `errno=0`、9 条结果、首篇 2491 字正文。搜索使用浏览器 `www.baidu.com/s` 请求的独立 Cookie，百家号 Cookie 只用于账号与 Item；两者不串用。重复请求仍可能遇百度安全验证，届时抛 `BaijiaSearchBlocked`，需要在官方网页处理。它不是百家号站内私有 API。 |
 | 图文发布与状态查询 | `BaijiaCreatorAPI.publish_article/query_article_status` | 百家号 App ID / Token 开放接口路由可达，匿名 GET 返回参数错误；POST 请求格式来自公开实现，**未用具备权限的账号发布或查询**。 |
 | 本地图片上传 | `BaijiaCreatorAPI.upload_image()` | `pcui/picture/uploadproxy` 路由可达；表单字段依据公开 Creator 客户端源码，未做账号实测。也可直接向图文发布接口传已托管的 HTTPS 封面 URL。 |
 | 视频发布 | — | 未核实端点及上传链路，暂未实现。 |
@@ -63,7 +63,7 @@ with BaijiaAuth.from_cookie(os.environ["BAIDU_COOKIES"]) as auth:
     print(item["title"], item["author"])
 ```
 
-`from_cookie` 复用已登录浏览器的 Cookie；应从本人浏览器网络请求的 `Cookie` 请求头复制完整值，`document.cookie` 可能缺少 HttpOnly Cookie。`from_browser_login` 则从临时浏览器会话读取包括 HttpOnly 在内、适用于登录检测 URL 的 Cookie。`from_qrcode_login` 保持兼容，内部调用同一浏览器登录流程，用户仍可自行选择手机号方式。登录成功只依据 `require_logged_in()` 对 `builder/app/appinfo` 的只读响应 `errno=0`，不依据页面文案或跳转地址。当前 Chrome 手机号登录后的该检查已实测 HTTP 200、`errno=0`、`data.user` 存在；独立 Playwright 会话尚未实测。平台返回失败 JSON 时给出 `errno`，发生跳转时直接报 HTTP 错误。携带 Cookie 或提交数据的请求不跟随重定向，避免把登录页当作接口成功。需要 Creator 图片上传时还需提供 `creator_token` 和 `app_id`。`refresh_creator_token()` 对 `builder/app/appinfo` 发 HEAD 请求，从响应头读取更新后的 token；**它需要已有 token，不能仅凭 Cookie 生成初始 token**。初始 token 应从本人已登录 Creator 页面发送的 `token` 请求头核对，刷新流程尚未做有凭据实测。
+`from_cookie` 复用已登录浏览器的百家号 Cookie；应从本人浏览器 `builder/app/appinfo` 请求的 `Cookie` 请求头复制完整值，`document.cookie` 可能缺少 HttpOnly Cookie。百度网页搜索使用另一个 Cookie：从同一浏览器 `www.baidu.com/s` 请求头取得，交给 `BaijiaSearchAPI(baidu_cookie=...)`。两者只保存在内存中，不要提交到仓库。`from_browser_login` 从临时浏览器会话读取包括 HttpOnly 在内、适用于百家号登录检测 URL 的 Cookie；它**尚未自动提供百度搜索 Cookie**。`from_qrcode_login` 保持兼容，内部调用同一浏览器登录流程，用户仍可自行选择手机号方式。登录成功只依据 `require_logged_in()` 对 `builder/app/appinfo` 的只读响应 `errno=0`，不依据页面文案或跳转地址。当前 Chrome 手机号登录后的该检查已实测 HTTP 200、`errno=0`、`data.user` 存在；独立 Playwright 会话尚未实测。平台返回失败 JSON 时给出 `errno`，发生跳转时直接报 HTTP 错误。携带 Cookie 或提交数据的请求不跟随重定向，避免把登录页当作接口成功。需要 Creator 图片上传时还需提供 `creator_token` 和 `app_id`。`refresh_creator_token()` 对 `builder/app/appinfo` 发 HEAD 请求，从响应头读取更新后的 token；**它需要已有 token，不能仅凭 Cookie 生成初始 token**。初始 token 应从本人已登录 Creator 页面发送的 `token` 请求头核对，刷新流程尚未做有凭据实测。
 
 ```python
 import os
@@ -80,6 +80,23 @@ with BaijiaAuth.from_cookie(
 ```
 
 ## 搜索与 Item
+
+当前 Chrome 会话的在线验收方式（两个 Cookie 均取自本人浏览器对应域名的请求，示例中从环境变量读取）：
+
+```python
+import os
+from baijia_apis import BaijiaAuth, BaijiaContentAPI, BaijiaSearchAPI
+
+with BaijiaAuth.from_cookie(os.environ["BAIDU_COOKIES"]) as auth:
+    auth.require_logged_in()
+    found = BaijiaSearchAPI(
+        auth, baidu_cookie=os.environ["BAIDU_SEARCH_COOKIES"]
+    ).search_articles("咖啡")
+    item = BaijiaContentAPI(auth).get_article(found["items"][0]["id"])
+    print(item["title"], len(item["content"]))
+```
+
+百度搜索仍可能要求人工完成安全验证，库会抛出 `BaijiaSearchBlocked`，不会自动解验证码。以下是无需登录的公开文章读取示例：
 
 ```python
 from baijia_apis import BaijiaAuth, BaijiaContentAPI, BaijiaSearchAPI

@@ -100,6 +100,13 @@ class ContentTests(unittest.TestCase):
         self.assertEqual(session.calls[0][2]["params"], {"id": "123"})
         self.assertNotIn("Cookie", session.calls[0][2]["headers"])
 
+    def test_logged_in_article_uses_baijia_cookie_only(self):
+        html = '<html><title>作品</title><div data-testid="article">正文</div></html>'
+        session = FakeSession(FakeResponse(text=html))
+        auth = BaijiaAuth.from_cookie("BAIDUID=baijia", session=session)
+        self.assertEqual(BaijiaContentAPI(auth).get_article("123")["content"], "正文")
+        self.assertEqual(session.calls[0][2]["headers"]["Cookie"], "BAIDUID=baijia")
+
     def test_posts_jsonp_and_interaction_request_contract(self):
         metrics = {
             "praise_num": 1, "comment_num": 2, "read_num": 3,
@@ -142,6 +149,17 @@ class SearchTests(unittest.TestCase):
         session = FakeSession(FakeResponse(text=html))
         items = BaijiaSearchAPI(BaijiaAuth(session=session)).search_articles("咖啡")["items"]
         self.assertEqual(items, [{"id": "123", "url": "https://baijiahao.baidu.com/s?id=123&wfr=spider", "title": "咖啡入门"}])
+
+    def test_site_search_scopes_optional_baidu_cookie(self):
+        html = '<div mu="https://baijiahao.baidu.com/s?id=123"><h3>咖啡</h3></div>'
+        session = FakeSession(FakeResponse(text=html), FakeResponse(text=html))
+        auth = BaijiaAuth.from_cookie("BAIDUID=baijia", session=session)
+        BaijiaSearchAPI(auth).search_articles("咖啡")
+        self.assertNotIn("Cookie", session.calls[0][2]["headers"])
+        api = BaijiaSearchAPI(auth, baidu_cookie="BDUSS=baidu")
+        self.assertEqual(api.search_articles("咖啡")["items"][0]["id"], "123")
+        self.assertEqual(session.calls[1][2]["headers"]["Cookie"], "BDUSS=baidu")
+        self.assertIs(session.calls[1][2]["allow_redirects"], False)
 
     def test_site_search_empty_results_are_not_parse_error(self):
         session = FakeSession(FakeResponse(text="<p>抱歉，未找到相关结果。</p>"))

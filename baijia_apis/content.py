@@ -98,7 +98,7 @@ class BaijiaContentAPI:
     def get_article(self, item: str) -> dict:
         """读取公开文章的 SSR 标题、作者、更新时间和正文文本。"""
         article_id = article_id_from(item)
-        response = self.auth.request("GET", ARTICLE_URL, params={"id": article_id}, use_cookie=False)
+        response = self.auth.request("GET", ARTICLE_URL, params={"id": article_id})
         parser = _ArticleHTML()
         parser.feed(response.text)
         title = parser.get("title")

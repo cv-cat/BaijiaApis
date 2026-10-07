@@ -6,7 +6,7 @@ from html.parser import HTMLParser
 import json
 from urllib.parse import urlparse
 
-from .auth import BaijiaAPIError, BaijiaParseError
+from .auth import BaijiaAPIError, BaijiaParseError, parse_cookies
 from .content import BaijiaContentAPI, article_id_from
 
 
@@ -85,9 +85,12 @@ class _SearchLinks(HTMLParser):
 
 
 class BaijiaSearchAPI:
-    def __init__(self, auth, content: BaijiaContentAPI | None = None):
+    def __init__(self, auth, content: BaijiaContentAPI | None = None, *, baidu_cookie: str = ""):
+        if baidu_cookie and not parse_cookies(baidu_cookie):
+            raise ValueError("baidu_cookie 格式无效")
         self.auth = auth
         self.content = content or BaijiaContentAPI(auth)
+        self.baidu_cookie = baidu_cookie.strip()
 
     def search_articles(self, query: str, *, page: int = 1) -> dict:
         """百度网页搜索中限定百家号域；这是网页搜索，不是百家号私有 API。
@@ -99,10 +102,14 @@ class BaijiaSearchAPI:
             raise ValueError("query 不能为空")
         if page < 1:
             raise ValueError("page 从 1 开始")
+        headers = {"Referer": "https://www.baidu.com/"}
+        if self.baidu_cookie:
+            # 仅向 www.baidu.com 发其自身 Cookie；百家号 Creator Cookie 不跨站复用。
+            headers["Cookie"] = self.baidu_cookie
         response = self.auth.request(
             "GET", SEARCH_URL, use_cookie=False,
             params={"wd": f"site:baijiahao.baidu.com {query}", "pn": (page - 1) * 10},
-            headers={"Referer": "https://www.baidu.com/"},
+            headers=headers, allow_redirects=False,
         )
         html = response.text
         if "百度安全验证" in html or "安全验证" in html or "captcha" in html.lower():

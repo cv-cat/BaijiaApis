@@ -96,14 +96,18 @@ with BaijiaAuth.from_partner_token(
     creator = BaijiaCreatorAPI(auth)
     # 显式调用以下方法才会提交作品。
     # result = creator.publish_article(
-    #     "示例标题", "<p>示例正文</p>",
+    #     "一篇示例文章", "<p>示例正文</p>",
     #     origin_url="https://example.com/original",
     #     cover_urls=["https://example.com/cover.jpg"],
     # )
     # status = creator.query_article_status(result["data"]["article_id"])
 ```
 
-`publish_article()` 返回平台原始 JSON；当 `errno` 非零时抛 `BaijiaAPIError`。开放接口可能要求账号审核通过、特定标题/封面规格或原文地址；这些约束需要用有权限账号按平台当前规则验证。当前没有视频发布方法，也不把网页后台的内部字段冒充稳定开放 API。
+`publish_article()` 要求有效的 `origin_url`，标题按公开 Go SDK 的计数规则为 5–40 字，富文本正文最多 20000 字。封面传 1–3 张 HTTP(S) 图片 URL；请求中的 `cover_images` 是 JSON 字符串。封面尺寸至少 218×146，当前只校验 URL，未下载图片验证尺寸。省略 `is_original` 时不发送原创声明；明确传入 `True` / `False` 才发送 `1` / `0`。
+
+无封面内容会进入草稿。需要草稿时显式使用 `cover_urls=[]` 与 `allow_draft=True`；默认拒绝无封面调用，避免误以为作品已发布。`publish_article()` 返回平台原始 JSON，`query_article_status()` 单次最多查询 20 个数字 ID，两者在 `errno` 非零时抛 `BaijiaAPIError`。同一批状态查询请勿混用文章 ID 与 NID。
+
+这些请求格式依据[公开 Go SDK 的图文发布实现](https://github.com/onlyliu1001/BaiJiaHaoSdk/blob/main/BaiJiaHaoSdk/ContentPublish.go)、[字段定义](https://github.com/onlyliu1001/BaiJiaHaoSdk/blob/main/BaiJiaHaoSdk/config.go)和[文章状态实现](https://github.com/onlyliu1001/BaiJiaHaoSdk/blob/main/BaiJiaHaoSdk/ContentManage.go)。开放接口需要账号权限；当前尚未使用有权限账号完成发布或状态查询。当前没有视频发布方法，也不把网页后台的内部字段冒充稳定开放 API。
 
 ## 旧版兼容
 

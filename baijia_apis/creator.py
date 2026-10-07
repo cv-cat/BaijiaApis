@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import unicodedata
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
@@ -27,6 +29,17 @@ def _image_type(data: bytes) -> tuple[str, str]:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png", ".png"
     raise ValueError("仅支持 JPEG 或 PNG 图片")
+
+
+def _sdk_char_count(value: str) -> int:
+    """按参考 SDK 的规则计字数：汉字/中文标点 1，其他字符 0.5，向上取整。"""
+    full_width_punctuation = set("·，。《》‘’”“；：〖〗？（）、")
+    half_units = 0
+    for char in value:
+        name = unicodedata.name(char, "")
+        is_han = name.startswith(("CJK UNIFIED IDEOGRAPH", "CJK COMPATIBILITY IDEOGRAPH"))
+        half_units += 2 if is_han or char in full_width_punctuation else 1
+    return (half_units + 1) // 2
 
 
 class BaijiaCreatorAPI:
@@ -91,7 +104,8 @@ class BaijiaCreatorAPI:
         *,
         origin_url: str = "",
         cover_urls: Iterable[str] = (),
-        is_original: bool = True,
+        is_original: bool | None = None,
+        allow_draft: bool = False,
     ) -> dict:
         """向 App ID / Token 开放接口提交图文。
 
@@ -99,24 +113,36 @@ class BaijiaCreatorAPI:
         """
         self._require_partner()
         title = title.strip()
-        if not title or not content_html.strip():
-            raise ValueError("标题和 HTML 正文不能为空")
+        if not 5 <= _sdk_char_count(title) <= 40:
+            raise ValueError("标题需为 5–40 字（英文字符按半字计算）")
+        if not content_html.strip() or _sdk_char_count(content_html) > 20_000:
+            raise ValueError("HTML 正文需在 1–20000 字以内（英文字符按半字计算）")
+        if not origin_url.strip():
+            raise ValueError("origin_url 原文地址不能为空")
+        origin_url = _valid_http_url(origin_url, "origin_url")
         if isinstance(cover_urls, (str, bytes)):
             raise ValueError("cover_urls 应为 URL 列表")
         covers = list(cover_urls)
         if len(covers) > 3:
             raise ValueError("最多传 3 张封面图")
-        if origin_url:
-            origin_url = _valid_http_url(origin_url, "origin_url")
+        if not covers and not allow_draft:
+            raise ValueError("无封面会进入草稿；如需草稿请传 allow_draft=True")
+        if is_original is not None and not isinstance(is_original, bool):
+            raise ValueError("is_original 必须是 bool 或 None")
         payload = {
             "app_id": self.auth.app_id,
             "app_token": self.auth.app_token,
             "title": title,
             "content": content_html,
             "origin_url": origin_url,
-            "cover_images": [{"src": _valid_http_url(url, "cover_urls")} for url in covers],
-            "is_original": int(is_original),
         }
+        if covers:
+            payload["cover_images"] = json.dumps(
+                [{"src": _valid_http_url(url, "cover_urls")} for url in covers],
+                ensure_ascii=False, separators=(",", ":"),
+            )
+        if is_original is not None:
+            payload["is_original"] = int(is_original)
         response = self.auth.request(
             "POST", f"{OPEN_BASE}/article/publish", json=payload, use_cookie=False,
             headers={"Accept": "application/json"},
@@ -135,9 +161,14 @@ class BaijiaCreatorAPI:
             ids = list(article_ids)
         if not ids or any(not str(value).isascii() or not str(value).isdigit() for value in ids):
             raise ValueError("article_ids 必须是数字 ID")
+        if len(ids) > 20:
+            raise ValueError("单次最多查询 20 篇文章状态")
         response = self.auth.request(
             "POST", f"{OPEN_BASE}/query/status", use_cookie=False,
             json={"app_id": self.auth.app_id, "app_token": self.auth.app_token, "article_id": ",".join(map(str, ids))},
             headers={"Accept": "application/json"},
         )
-        return response_json(response)
+        result = response_json(response)
+        if result.get("errno") not in (0, "0"):
+            raise BaijiaAPIError(f"状态查询失败：errno={result.get('errno')}，{result.get('errmsg', '')}")
+        return result

@@ -3,6 +3,7 @@ import unittest
 
 from baidu_apis import BaiduApis
 from baijia_apis import (
+    BaijiaAPIError,
     BaijiaAuth,
     BaijiaContentAPI,
     BaijiaCreatorAPI,
@@ -126,14 +127,59 @@ class CreatorTests(unittest.TestCase):
         )
         auth = BaijiaAuth.from_partner_token("app-id", "app-token", session=session)
         api = BaijiaCreatorAPI(auth)
-        self.assertEqual(api.publish_article("标题", "<p>正文</p>", cover_urls=["https://example.com/a.jpg"])["data"]["article_id"], "123")
+        self.assertEqual(api.publish_article(
+            "测试标题示例", "<p>正文</p>", origin_url="https://example.com/original",
+            cover_urls=["https://example.com/a.jpg"],
+        )["data"]["article_id"], "123")
         self.assertEqual(api.query_article_status("123")["errno"], 0)
         method, url, kwargs = session.calls[0]
         self.assertEqual((method, url), ("POST", "https://baijiahao.baidu.com/builderinner/open/resource/article/publish"))
-        self.assertEqual(kwargs["json"]["cover_images"], [{"src": "https://example.com/a.jpg"}])
-        self.assertEqual(kwargs["json"]["is_original"], 1)
+        self.assertEqual(kwargs["json"], {
+            "app_id": "app-id", "app_token": "app-token", "title": "测试标题示例",
+            "content": "<p>正文</p>", "origin_url": "https://example.com/original",
+            "cover_images": '[{"src":"https://example.com/a.jpg"}]',
+        })
         self.assertNotIn("Cookie", kwargs["headers"])
         self.assertEqual(session.calls[1][2]["json"]["article_id"], "123")
+
+    def test_publish_requires_origin_and_explicit_draft_choice(self):
+        session = FakeSession(FakeResponse(data={"errno": 0, "data": {"article_id": "456"}}))
+        api = BaijiaCreatorAPI(BaijiaAuth.from_partner_token("app-id", "app-token", session=session))
+        with self.assertRaises(ValueError):
+            api.publish_article("测试标题示例", "<p>正文</p>", cover_urls=["https://example.com/a.jpg"])
+        with self.assertRaises(ValueError):
+            api.publish_article("测试标题示例", "<p>正文</p>", origin_url="https://example.com/original")
+        self.assertEqual(session.calls, [])
+        api.publish_article(
+            "测试标题示例", "<p>正文</p>", origin_url="https://example.com/original",
+            allow_draft=True, is_original=False,
+        )
+        payload = session.calls[0][2]["json"]
+        self.assertNotIn("cover_images", payload)
+        self.assertEqual(payload["is_original"], 0)
+
+    def test_publish_validates_sdk_length_before_network(self):
+        session = FakeSession()
+        api = BaijiaCreatorAPI(BaijiaAuth.from_partner_token("app-id", "app-token", session=session))
+        options = {"origin_url": "https://example.com/original", "cover_urls": ["https://example.com/a.jpg"]}
+        for title, content in (("标题", "<p>正文</p>"), ("A" * 81, "<p>正文</p>"), ("测试标题示例", "汉" * 20_001)):
+            with self.subTest(title=title[:10], content_length=len(content)), self.assertRaises(ValueError):
+                api.publish_article(title, content, **options)
+        self.assertEqual(session.calls, [])
+
+    def test_status_limit_and_platform_error(self):
+        session = FakeSession(
+            FakeResponse(data={"errno": 0, "data": {}}),
+            FakeResponse(data={"errno": 1001, "errmsg": "invalid app token"}),
+        )
+        api = BaijiaCreatorAPI(BaijiaAuth.from_partner_token("app-id", "app-token", session=session))
+        api.query_article_status([str(i) for i in range(20)])
+        self.assertEqual(len(session.calls[0][2]["json"]["article_id"].split(",")), 20)
+        with self.assertRaises(ValueError):
+            api.query_article_status([str(i) for i in range(21)])
+        self.assertEqual(len(session.calls), 1)
+        with self.assertRaises(BaijiaAPIError):
+            api.query_article_status("123")
 
     def test_creator_upload_is_multipart_and_returns_https_url(self):
         session = FakeSession(FakeResponse(data={"errno": 0, "ret": {"https_url": "https://pic.example/a.png"}}))

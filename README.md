@@ -83,7 +83,7 @@ finally:
     login.close()
 ```
 
-`from_browser_login()` 仍保留为兼容名称，但会立即抛 `BaijiaLoginProtocolUnavailable`；仓库没有任何 Playwright 或浏览器 Cookie 读取。短信密码、动态图片验证码和滑块由百度 Passport/安全控件完成，客户端只报告 `challenge` 或 `BaijiaSearchBlocked`，不伪造参数、不绕过验证。二维码图片和 Cookie 都只存在于进程内，不写日志或文件。
+`from_browser_login()` 仍保留为兼容名称，但会立即抛 `BaijiaLoginProtocolUnavailable`；仓库没有浏览器自动化或浏览器 Cookie 读取。短信密码、动态图片验证码和滑块由百度 Passport/安全控件完成，客户端只报告 `challenge` 或 `BaijiaSearchBlocked`，不伪造参数、不绕过验证。二维码图片和 Cookie 都只存在于进程内，不写日志或文件。
 
 ## 搜索与 Item
 

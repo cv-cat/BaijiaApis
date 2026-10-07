@@ -149,6 +149,44 @@ class SearchTests(unittest.TestCase):
 
 
 class CreatorTests(unittest.TestCase):
+    def test_web_work_list_uses_cookie_and_observed_view_parameters(self):
+        data = {"errno": 0, "data": {"list": [], "page": {"currentPage": 1, "pageSize": 10, "totalCount": 0, "totalPage": 0}}}
+        session = FakeSession(*(FakeResponse(data=data) for _ in range(3)))
+        api = BaijiaCreatorAPI(BaijiaAuth.from_cookie("BAIDUID=mine", session=session))
+        for view in ("all", "news", "draft"):
+            self.assertEqual(api.list_web_works(page=2, view=view)["data"]["list"], [])
+        for view, call in zip(("all", "news", "draft"), session.calls):
+            method, url, kwargs = call
+            self.assertEqual((method, url), ("GET", "https://baijiahao.baidu.com/pcui/article/lists"))
+            self.assertEqual(kwargs["headers"]["Cookie"], "BAIDUID=mine")
+            self.assertNotIn("token", kwargs["headers"])
+            self.assertIs(kwargs["allow_redirects"], False)
+            self.assertEqual(kwargs["params"]["currentPage"], 2)
+            self.assertEqual(kwargs["params"]["pageSize"], 10)
+            self.assertEqual(kwargs["params"]["type"], "" if view == "all" else "news")
+            self.assertEqual(kwargs["params"]["collection"], "draft" if view == "draft" else "")
+            self.assertEqual("dynamic" in kwargs["params"], view == "all")
+
+    def test_web_work_list_requires_cookie_and_valid_response(self):
+        session = FakeSession(
+            FakeResponse(data={"errno": 10001401, "data": None}),
+            FakeResponse(data={"errno": 0, "data": {"list": {}}}),
+        )
+        api = BaijiaCreatorAPI(BaijiaAuth(session=session))
+        with self.assertRaises(BaijiaAuthError):
+            api.list_web_works()
+        api = BaijiaCreatorAPI(BaijiaAuth.from_cookie("BAIDUID=mine", session=session))
+        for page in (0, True, 1.5):
+            with self.assertRaises(ValueError):
+                api.list_web_works(page=page)
+        with self.assertRaises(ValueError):
+            api.list_web_works(view="published")
+        self.assertEqual(session.calls, [])
+        with self.assertRaisesRegex(BaijiaAPIError, "10001401"):
+            api.list_web_works()
+        with self.assertRaises(BaijiaParseError):
+            api.list_web_works()
+
     def test_partner_publish_body_and_status_contract(self):
         session = FakeSession(
             FakeResponse(data={"errno": 0, "data": {"article_id": "123"}}),

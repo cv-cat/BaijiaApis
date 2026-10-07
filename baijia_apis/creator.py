@@ -1,4 +1,4 @@
-"""百家号图文开放接口，以及 Creator 端图片上传。"""
+"""百家号 Creator 网页只读列表、图片上传和图文开放接口。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,10 @@ from .auth import BaijiaAuth, BaijiaAPIError, BaijiaAuthError, BaijiaParseError,
 
 
 OPEN_BASE = "https://baijiahao.baidu.com/builderinner/open/resource"
+WEB_LIST_URL = "https://baijiahao.baidu.com/pcui/article/lists"
 UPLOAD_URL = "https://baijiahao.baidu.com/pcui/picture/uploadproxy"
 CREATOR_REFERER = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
+CONTENT_REFERER = "https://baijiahao.baidu.com/builder/rc/content"
 
 
 def _valid_http_url(value: str, label: str) -> str:
@@ -53,6 +55,38 @@ class BaijiaCreatorAPI:
     def _require_creator(self) -> None:
         if not self.auth.cookie or not self.auth.creator_token or not self.auth.app_id:
             raise BaijiaAuthError("图片上传需要 Cookie、Creator token 和 App ID")
+
+    def list_web_works(self, *, page: int = 1, view: str = "all") -> dict:
+        """读取当前登录账号的作品列表；无需开放接口 App Token。
+
+        view 仅支持已在 Creator 页面核对的全部、图文和图文草稿视图。
+        """
+        if not self.auth.cookie:
+            raise BaijiaAuthError("Web 作品列表需要登录 Cookie")
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            raise ValueError("page 必须是从 1 开始的整数")
+        if view not in ("all", "news", "draft"):
+            raise ValueError("view 仅支持 all、news、draft")
+        params = {
+            "currentPage": page,
+            "pageSize": 10,
+            "search": "",
+            "type": "" if view == "all" else "news",
+            "collection": "draft" if view == "draft" else "",
+            "startDate": "",
+            "endDate": "",
+            "clearBeforeFetch": "false",
+        }
+        if view == "all":
+            params["dynamic"] = "1"
+        response = self.auth.request("GET", WEB_LIST_URL, params=params, headers={"Referer": CONTENT_REFERER})
+        result = response_json(response)
+        if str(result.get("errno")) != "0":
+            raise BaijiaAPIError(f"Web 作品列表读取失败：errno={result.get('errno')}")
+        data = result.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("list"), list) or not isinstance(data.get("page"), dict):
+            raise BaijiaParseError("Web 作品列表缺少 data.list 或 data.page")
+        return result
 
     def upload_image(self, path_or_bytes, *, filename: str | None = None) -> str:
         """上传本地 JPEG/PNG；返回 Creator 图片 HTTPS URL。

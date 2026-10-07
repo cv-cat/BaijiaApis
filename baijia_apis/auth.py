@@ -1,14 +1,17 @@
-"""百家号会话。扫码/短信流程尚无核实的请求契约，使用现有 Cookie。"""
+"""百家号会话。扫码登录交给官方网页，Cookie 仅保留在内存中。"""
 
 from __future__ import annotations
 
 import json
+import time
+from contextlib import contextmanager
 from urllib.parse import urlparse
 
 from curl_cffi import requests
 
 
 APPINFO_URL = "https://baijiahao.baidu.com/builder/app/appinfo"
+LOGIN_URL = "https://baijiahao.baidu.com/"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -21,6 +24,10 @@ class BaijiaAPIError(RuntimeError):
 
 class BaijiaAuthError(BaijiaAPIError):
     """缺少或失效的身份材料。"""
+
+
+class BaijiaLoginTimeout(BaijiaAuthError):
+    """等待用户完成官方扫码登录超时。"""
 
 
 class BaijiaParseError(BaijiaAPIError):
@@ -47,6 +54,43 @@ def response_json(response) -> dict:
     if not isinstance(result, dict):
         raise BaijiaParseError("接口应返回 JSON 对象")
     return result
+
+
+@contextmanager
+def _visible_login_context():
+    """启动独立的临时 Chrome 会话；不复用或保存现有浏览器资料。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        raise BaijiaAuthError("扫码登录需要安装 playwright：python -m pip install playwright") from None
+
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch(channel="chrome", headless=False)
+        except Exception:
+            raise BaijiaAuthError("无法启动可见 Chrome；请确认本机已安装 Chrome") from None
+        try:
+            context = browser.new_context()
+            try:
+                yield context
+            finally:
+                context.close()
+        finally:
+            browser.close()
+
+
+def _cookie_header_for_appinfo(context) -> str:
+    """仅读取会发送给百家号会话检查 URL 的 Cookie，包括 HttpOnly。"""
+    pairs = []
+    for cookie in context.cookies([APPINFO_URL]):
+        name = cookie.get("name", "")
+        value = cookie.get("value", "")
+        if not name or any(char in name for char in "=;\r\n"):
+            continue
+        if any(char in value for char in ";\r\n"):
+            continue
+        pairs.append(f"{name}={value}")
+    return "; ".join(pairs)
 
 
 class BaijiaAuth:
@@ -83,6 +127,74 @@ class BaijiaAuth:
         if not parse_cookies(cookie):
             raise BaijiaAuthError("需要有效的 Cookie 字符串")
         return cls(cookie=cookie, **kwargs)
+
+    @classmethod
+    def from_qrcode_login(
+        cls,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 2,
+        request_timeout: float = 20,
+        session=None,
+    ) -> "BaijiaAuth":
+        """显示百家号官方登录页，等待扫码并校验内存中的浏览器 Cookie。
+
+        使用独立的临时 Chrome 会话；用户在可见页面自行打开官方二维码并扫码。
+        不调用未核实的二维码协议，也不读写浏览器资料、storage_state 或 Cookie 文件。
+        """
+        if timeout <= 0 or poll_interval <= 0 or request_timeout <= 0:
+            raise ValueError("timeout、poll_interval、request_timeout 必须大于 0")
+
+        last_cookie = ""
+        last_error = ""
+        next_probe = 0.0
+        with _visible_login_context() as context:
+            page = context.new_page()
+            try:
+                page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=min(timeout, 30) * 1000)
+            except Exception:
+                raise BaijiaAuthError("无法打开百家号官方登录页；请检查网络后重试") from None
+            print("请在新打开的百家号页面点击登录/注册，使用百度 App 扫描官方二维码并确认。")
+            deadline = time.monotonic() + timeout
+
+            while time.monotonic() < deadline:
+                try:
+                    if page.is_closed():
+                        raise BaijiaAuthError("登录窗口已关闭，扫码登录未完成")
+                    cookie_header = _cookie_header_for_appinfo(context)
+                except BaijiaAuthError:
+                    raise
+                except Exception:
+                    raise BaijiaAuthError("登录窗口已关闭或 Cookie 读取失败") from None
+
+                now = time.monotonic()
+                if cookie_header and (cookie_header != last_cookie or now >= next_probe):
+                    last_cookie = cookie_header
+                    next_probe = now + max(10, poll_interval)
+                    candidate = cls.from_cookie(cookie_header, session=session, timeout=request_timeout)
+                    try:
+                        candidate.require_logged_in()
+                    except BaijiaAPIError as exc:
+                        # 只记异常类型或平台状态，不记录 Cookie 或响应正文。
+                        last_error = str(exc)
+                        candidate.close()
+                    except Exception:
+                        candidate.close()
+                        raise BaijiaAuthError("扫码后会话校验请求失败") from None
+                    else:
+                        return candidate
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    page.wait_for_timeout(min(poll_interval, remaining) * 1000)
+                except Exception:
+                    raise BaijiaAuthError("登录窗口已关闭，扫码登录未完成") from None
+
+        if last_error:
+            raise BaijiaAuthError(f"候选 Cookie 未通过会话校验，等待扫码超时：{last_error}")
+        raise BaijiaLoginTimeout("等待百家号官方二维码扫码登录超时")
 
     @classmethod
     def from_partner_token(cls, app_id: str, app_token: str, **kwargs) -> "BaijiaAuth":

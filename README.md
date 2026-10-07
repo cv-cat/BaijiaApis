@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Cookie 登录会话 | `BaijiaAuth.from_browser_login()`、`from_qrcode_login()`、`from_cookie()`、`require_logged_in()` | 当前 Chrome 使用手机号登录后，同源只读 GET `builder/app/appinfo` 已实测 HTTP 200、`errno=0` 且返回 `data.user`。独立 Playwright 新窗口登录流程尚未实测。 |
 | 本人网页作品列表 | `BaijiaCreatorAPI.list_web_works()` | 当前登录会话的 `GET pcui/article/lists` 已实测 HTTP 200、`errno=0`，无需伙伴 App Token；全部、图文、图文草稿视图与分页参数已核对。当前账号列表为空。库中独立 Cookie 请求尚未实测。 |
-| 网页图文草稿 | `BaijiaCreatorAPI.save_web_draft()` | 当前 Chrome 官方编辑器“存草稿”已实测 `POST pcui/article/save?callback=bjhdraft`：表单提交，使用 Cookie 与 Creator `token` 头，返回 `ret.article_id`；草稿列表出现后已删除并复核为空。库中独立 HTTP 调用尚未实测。 |
+| 网页图文草稿 | `BaijiaCreatorAPI.save_web_draft()`、`delete_web_draft()` | 当前 Chrome 官方编辑器已实测保存与删除临时草稿：均用 Cookie 与 Creator `token` 头；删除后草稿列表为空。库中独立 HTTP 调用尚未实测。 |
 | 作者资料、动态、互动数据 | `BaijiaContentAPI.get_user_info/get_user_posts/get_item_metrics` | 公开作者主页已匿名 GET 实测；动态和互动沿用旧仓库的 `mbd.baidu.com/webpage` JSONP 契约，新增解析和请求契约测试，尚未用有效账号回放。 |
 | 公开文章 Item | `BaijiaContentAPI.get_article()` | 已对公开 `baijiahao.baidu.com/s?id=...` 页面做匿名 GET 实测，解析标题、作者、更新时间与正文。HTML 结构变化可能需要更新解析器。 |
 | 指定作者内容搜索 | `BaijiaSearchAPI.search_user_posts()` | 逐页读取作者动态，按文字在本地筛选。依赖上述动态接口。 |
@@ -112,7 +112,7 @@ with BaijiaAuth.from_browser_login() as auth:
 
 ### 网页图文草稿
 
-已在本人登录的官方编辑器中用中性测试内容点击一次“存草稿”：`POST /pcui/article/save?callback=bjhdraft`，请求为 URL 编码表单，携带 Cookie 与 Creator `token` 头；响应 `errno=0`，`ret.article_id` 为数字 ID。该 ID 随后出现在图文草稿列表。删除入口 `POST /pcui/article/remove` 返回 `errno=0`，再次查询草稿列表为 0。没有点击公开“发布”。`save_web_draft()` 仅封装已观察的新增草稿请求，不接受伙伴 App Token 代替 Creator token。
+已在本人登录的官方编辑器中用中性测试内容点击一次“存草稿”：`POST /pcui/article/save?callback=bjhdraft`，请求为 URL 编码表单，携带 Cookie 与 Creator `token` 头；响应 `errno=0`，`ret.article_id` 为数字 ID。该 ID 随后出现在图文草稿列表。删除入口 `POST /pcui/article/remove` 只提交表单 `article_id`，使用同一类 Cookie 与 Creator `token`，返回 `errno=0`；再次查询草稿列表为 0。没有点击公开“发布”。网页草稿方法不接受伙伴 App Token 代替 Creator token。
 
 ```python
 import os
@@ -124,10 +124,12 @@ with BaijiaAuth.from_cookie(
     creator = BaijiaCreatorAPI(auth)
     # 显式调用后会在本人账号创建草稿；不要对未知结果直接重试。
     # draft = creator.save_web_draft("测试草稿标题", "<p>测试正文</p>")
+    # 确认草稿 ID 后，显式调用才会永久删除该草稿。
+    # creator.delete_web_draft(draft["ret"]["article_id"])
     pass
 ```
 
-网页实测请求还含当前账号页面给出的活动列表及选中状态；方法可用 `activities=[("活动 ID", True), ...]` 传入。默认省略活动字段尚未通过真实账号回放。`from_browser_login()` 只返回 Cookie，不提取 Creator token；调用草稿方法前需从本人 Creator 会话取得该 token 并只保存在本机内存。`save_web_draft()` 要求标题 2–64 字、非空 HTML 正文。此次样本 `len=29`，与提交的 HTML 29 字符相符；纯文本为 22 字、UTF-8 为 73 字节。方法按 Python HTML 字符数填 `len`；非 BMP 字符（如 emoji）的长度规则尚未实测，因此在提交前拒绝。若平台报告 `errno=0` 却没有 `ret.article_id`，先查草稿列表，勿直接重试。当前尚未用 `curl_cffi` 复现真实草稿提交。
+网页实测保存请求还含当前账号页面给出的活动列表及选中状态；方法可用 `activities=[("活动 ID", True), ...]` 传入。默认省略活动字段尚未通过真实账号回放。`from_browser_login()` 只返回 Cookie，不提取 Creator token；调用草稿方法前需从本人 Creator 会话取得该 token 并只保存在本机内存。`save_web_draft()` 要求标题 2–64 字、非空 HTML 正文。此次样本 `len=29`，与提交的 HTML 29 字符相符；纯文本为 22 字、UTF-8 为 73 字节。方法按 Python HTML 字符数填 `len`；非 BMP 字符（如 emoji）的长度规则尚未实测，因此在提交前拒绝。若平台报告 `errno=0` 却没有 `ret.article_id`，先查草稿列表，勿直接重试。`delete_web_draft(article_id)` 只接受调用者显式传入的正整数数字 ID，不查找、不批量删除、不自动重试；调用前请在草稿列表确认目标 ID。当前尚未用 `curl_cffi` 复现真实保存或删除。
 
 ## 图文发布
 

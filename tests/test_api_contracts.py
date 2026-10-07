@@ -236,6 +236,35 @@ class CreatorTests(unittest.TestCase):
             api.save_web_draft("临时草稿", "<p>正文</p>")
         self.assertEqual(len(session.calls), 2)
 
+    def test_delete_web_draft_requires_explicit_numeric_id_and_uses_observed_form(self):
+        session = FakeSession(FakeResponse(data={"errno": 0}))
+        auth = BaijiaAuth.from_cookie("BAIDUID=mine", creator_token="creator-token", session=session)
+        api = BaijiaCreatorAPI(auth)
+        for article_id in ("", "0", 0, " 123", "123 ", "１２３", "123a", -1, 1.5, True, None):
+            with self.subTest(article_id=article_id), self.assertRaises(ValueError):
+                api.delete_web_draft(article_id)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(api.delete_web_draft("123"), {"errno": 0})
+        self.assertEqual(len(session.calls), 1)
+        method, url, kwargs = session.calls[0]
+        self.assertEqual((method, url), ("POST", "https://baijiahao.baidu.com/pcui/article/remove"))
+        self.assertEqual(kwargs["data"], {"article_id": "123"})
+        self.assertEqual(kwargs["headers"]["Cookie"], "BAIDUID=mine")
+        self.assertEqual(kwargs["headers"]["token"], "creator-token")
+        self.assertIs(kwargs["allow_redirects"], False)
+        self.assertNotIn("json", kwargs)
+        self.assertNotIn("params", kwargs)
+
+    def test_delete_web_draft_requires_web_auth_and_does_not_retry_error(self):
+        empty = BaijiaCreatorAPI(BaijiaAuth(session=FakeSession()))
+        with self.assertRaises(BaijiaAuthError):
+            empty.delete_web_draft("123")
+        session = FakeSession(FakeResponse(data={"errno": 10001401}))
+        auth = BaijiaAuth.from_cookie("BAIDUID=mine", creator_token="creator-token", session=session)
+        with self.assertRaisesRegex(BaijiaAPIError, "勿直接重试"):
+            BaijiaCreatorAPI(auth).delete_web_draft(123)
+        self.assertEqual(len(session.calls), 1)
+
     def test_partner_publish_body_and_status_contract(self):
         session = FakeSession(
             FakeResponse(data={"errno": 0, "data": {"article_id": "123"}}),

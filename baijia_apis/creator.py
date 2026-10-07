@@ -14,6 +14,7 @@ from .auth import BaijiaAuth, BaijiaAPIError, BaijiaAuthError, BaijiaParseError,
 OPEN_BASE = "https://baijiahao.baidu.com/builderinner/open/resource"
 WEB_LIST_URL = "https://baijiahao.baidu.com/pcui/article/lists"
 WEB_SAVE_URL = "https://baijiahao.baidu.com/pcui/article/save"
+WEB_REMOVE_URL = "https://baijiahao.baidu.com/pcui/article/remove"
 UPLOAD_URL = "https://baijiahao.baidu.com/pcui/picture/uploadproxy"
 CREATOR_REFERER = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
 WEB_EDITOR_REFERER = "https://baijiahao.baidu.com/builder/rc/edit?type=news&is_from_cms=1"
@@ -159,6 +160,25 @@ class BaijiaCreatorAPI:
         article_id = ret.get("article_id") if isinstance(ret, dict) else None
         if not str(article_id or "").isascii() or not str(article_id or "").isdigit():
             raise BaijiaParseError("草稿请求可能已成功，但缺少 ret.article_id；请先检查草稿列表，勿直接重试")
+        return result
+
+    def delete_web_draft(self, article_id: str | int) -> dict:
+        """显式删除一个已确认的网页草稿；不会查找、批量删除或自动重试。"""
+        self._require_web_editor()
+        if isinstance(article_id, bool) or not isinstance(article_id, (str, int)):
+            raise ValueError("article_id 必须是正整数数字 ID")
+        article_id_text = str(article_id)
+        if not article_id_text.isascii() or not article_id_text.isdigit() or not article_id_text.strip("0"):
+            raise ValueError("article_id 必须是正整数数字 ID")
+        response = self.auth.request(
+            "POST", WEB_REMOVE_URL, data={"article_id": article_id_text},
+            headers={"token": self.auth.creator_token},
+        )
+        result = response_json(response)
+        if str(result.get("errno")) != "0":
+            raise BaijiaAPIError(
+                f"Web 草稿删除结果未确认：errno={result.get('errno')}；请先检查草稿列表，勿直接重试"
+            )
         return result
 
     def upload_image(self, path_or_bytes, *, filename: str | None = None) -> str:

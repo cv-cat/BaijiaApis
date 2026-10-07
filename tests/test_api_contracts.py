@@ -79,6 +79,18 @@ class AuthTests(unittest.TestCase):
         auth = BaijiaAuth.from_cookie("A=old; B=keep", session=session)
         auth.login_state()
         self.assertEqual(auth.cookie, "B=keep")
+
+    def test_explicit_token_header_is_not_duplicated_case_insensitively(self):
+        session = FakeSession(FakeResponse(data={"errno": 0}))
+        auth = BaijiaAuth.from_cookie("A=1", creator_token="auth-token", session=session)
+        auth.request(
+            "GET",
+            "https://baijiahao.baidu.com/pcui/menu/auth",
+            headers={"Token": "explicit-token"},
+        )
+        sent = session.calls[0][2]["headers"]
+        self.assertEqual(sent["Token"], "explicit-token")
+        self.assertNotIn("token", sent)
     def test_cookie_parser_and_login_probe(self):
         self.assertEqual(parse_cookies("BAIDUID=a=b; Hmery-Time=123"), {"BAIDUID": "a=b", "Hmery-Time": "123"})
         session = FakeSession(FakeResponse(data={"errno": 10001401, "data": None}))

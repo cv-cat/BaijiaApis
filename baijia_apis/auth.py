@@ -765,11 +765,11 @@ class BaijiaAuth:
             cookie_header = self.cookie_header_for_url(url)
             if cookie_header:
                 request_headers["Cookie"] = cookie_header
+        if headers:
+            request_headers.update(headers)
         if use_cookie and self.creator_token and parsed.path.startswith(("/builder/", "/pcui/", "/user-ui/")):
             if not any(str(name).lower() == "token" for name in request_headers):
                 request_headers["token"] = self.creator_token
-        if headers:
-            request_headers.update(headers)
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("impersonate", "chrome150")
         # Cookie 与开放接口 token 不应跟随平台跳转，避免把登录页当作接口成功。

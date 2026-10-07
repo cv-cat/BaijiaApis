@@ -56,7 +56,7 @@ class AuthTests(unittest.TestCase):
             auth.request("GET", "https://example.com/collect")
         self.assertEqual(session.calls, [])
 
-    def test_browser_cookie_preflight_and_redirect_handling(self):
+    def test_cookie_preflight_and_redirect_handling(self):
         session = FakeSession(
             FakeResponse(data={"errno": "0", "data": {"name": "作者"}}),
             FakeResponse(data={"errno": "0", "data": {"name": "作者"}}),
@@ -72,7 +72,7 @@ class AuthTests(unittest.TestCase):
             auth.login_state()
         self.assertTrue(all(call[2]["allow_redirects"] is False for call in session.calls))
 
-    def test_creator_token_refresh_uses_existing_browser_credentials(self):
+    def test_creator_token_refresh_uses_existing_credentials(self):
         session = FakeSession(FakeResponse(headers={"token": "new-token"}))
         auth = BaijiaAuth.from_cookie(
             "BAIDUID=x", creator_token="old-token", session=session,

@@ -1,17 +1,19 @@
-"""百家号会话。网页登录交给官方网页，Cookie 仅保留在内存中。"""
+"""百家号纯 HTTP 会话。
+
+登录材料必须由调用方以 Cookie/Token 形式提供。仓库不启动浏览器、不读取
+浏览器资料，也不猜测二维码、短信或验证码回调协议；这些流程的请求证据齐全
+之前，入口会明确报告协议未核实。
+"""
 
 from __future__ import annotations
 
 import json
-import time
-from contextlib import contextmanager
 from urllib.parse import urlparse
 
 from curl_cffi import requests
 
 
 APPINFO_URL = "https://baijiahao.baidu.com/builder/app/appinfo"
-LOGIN_URL = "https://baijiahao.baidu.com/"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -27,7 +29,11 @@ class BaijiaAuthError(BaijiaAPIError):
 
 
 class BaijiaLoginTimeout(BaijiaAuthError):
-    """等待用户完成官方网页登录超时。"""
+    """兼容旧调用方；纯 HTTP 登录不使用等待窗口。"""
+
+
+class BaijiaLoginProtocolUnavailable(BaijiaAuthError):
+    """二维码、短信或验证码登录协议尚无可核实的请求证据。"""
 
 
 class BaijiaParseError(BaijiaAPIError):
@@ -54,43 +60,6 @@ def response_json(response) -> dict:
     if not isinstance(result, dict):
         raise BaijiaParseError("接口应返回 JSON 对象")
     return result
-
-
-@contextmanager
-def _visible_login_context():
-    """启动独立的临时 Chrome 会话；不复用或保存现有浏览器资料。"""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        raise BaijiaAuthError("浏览器登录需要安装 playwright：python -m pip install playwright") from None
-
-    with sync_playwright() as playwright:
-        try:
-            browser = playwright.chromium.launch(channel="chrome", headless=False)
-        except Exception:
-            raise BaijiaAuthError("无法启动可见 Chrome；请确认本机已安装 Chrome") from None
-        try:
-            context = browser.new_context()
-            try:
-                yield context
-            finally:
-                context.close()
-        finally:
-            browser.close()
-
-
-def _cookie_header_for_appinfo(context) -> str:
-    """仅读取会发送给百家号会话检查 URL 的 Cookie，包括 HttpOnly。"""
-    pairs = []
-    for cookie in context.cookies([APPINFO_URL]):
-        name = cookie.get("name", "")
-        value = cookie.get("value", "")
-        if not name or any(char in name for char in "=;\r\n"):
-            continue
-        if any(char in value for char in ";\r\n"):
-            continue
-        pairs.append(f"{name}={value}")
-    return "; ".join(pairs)
 
 
 class BaijiaAuth:
@@ -129,88 +98,53 @@ class BaijiaAuth:
         return cls(cookie=cookie, **kwargs)
 
     @classmethod
-    def from_browser_login(
+    def from_http_login(
         cls,
         *,
-        timeout: float = 300,
-        poll_interval: float = 2,
-        request_timeout: float = 20,
+        cookie: str,
+        creator_token: str = "",
+        app_id: str = "",
+        app_token: str = "",
         session=None,
+        timeout: float = 20,
     ) -> "BaijiaAuth":
-        """显示百家号官方登录页，等待用户完成登录并校验浏览器 Cookie。
+        """从调用方提供的网页登录材料创建并验证纯 HTTP 会话。
 
-        使用独立的临时 Chrome 会话；用户在可见页面选择手机号或二维码登录。
-        不调用未核实的登录协议，不读取现有 Chrome 资料或保存 Cookie 文件。
+        ``cookie`` 必须来自同一个百家号请求的完整 Cookie 头（包括需要的
+        HttpOnly 字段）。方法只向 ``builder/app/appinfo`` 发一次验证请求，
+        不打开浏览器，也不持久化 Cookie。
         """
-        if timeout <= 0 or poll_interval <= 0 or request_timeout <= 0:
-            raise ValueError("timeout、poll_interval、request_timeout 必须大于 0")
+        auth = cls.from_cookie(
+            cookie,
+            creator_token=creator_token,
+            app_id=app_id,
+            app_token=app_token,
+            session=session,
+            timeout=timeout,
+        )
+        try:
+            auth.require_logged_in()
+        except Exception:
+            auth.close()
+            raise
+        return auth
 
-        last_cookie = ""
-        last_error = ""
-        next_probe = 0.0
-        with _visible_login_context() as context:
-            page = context.new_page()
-            try:
-                page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=min(timeout, 30) * 1000)
-            except Exception:
-                raise BaijiaAuthError("无法打开百家号官方登录页；请检查网络后重试") from None
-            print("请在新打开的百家号页面点击登录/注册，选择手机号或官方二维码完成登录。")
-            deadline = time.monotonic() + timeout
-
-            while time.monotonic() < deadline:
-                try:
-                    if page.is_closed():
-                        raise BaijiaAuthError("登录窗口已关闭，网页登录未完成")
-                    cookie_header = _cookie_header_for_appinfo(context)
-                except BaijiaAuthError:
-                    raise
-                except Exception:
-                    raise BaijiaAuthError("登录窗口已关闭或 Cookie 读取失败") from None
-
-                now = time.monotonic()
-                if cookie_header and (cookie_header != last_cookie or now >= next_probe):
-                    last_cookie = cookie_header
-                    next_probe = now + max(10, poll_interval)
-                    candidate = cls.from_cookie(cookie_header, session=session, timeout=request_timeout)
-                    try:
-                        candidate.require_logged_in()
-                    except BaijiaAPIError as exc:
-                        # 只记异常类型或平台状态，不记录 Cookie 或响应正文。
-                        last_error = str(exc)
-                        candidate.close()
-                    except Exception:
-                        candidate.close()
-                        raise BaijiaAuthError("网页登录会话校验请求失败") from None
-                    else:
-                        return candidate
-
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    page.wait_for_timeout(min(poll_interval, remaining) * 1000)
-                except Exception:
-                    raise BaijiaAuthError("登录窗口已关闭，网页登录未完成") from None
-
-        if last_error:
-            raise BaijiaAuthError(f"候选 Cookie 未通过会话校验，等待登录超时：{last_error}")
-        raise BaijiaLoginTimeout("等待百家号官方网页登录超时")
+    @classmethod
+    def from_browser_login(cls, **_kwargs) -> "BaijiaAuth":
+        """兼容旧名称；浏览器自动化已移除。"""
+        raise BaijiaLoginProtocolUnavailable(
+            "已移除浏览器登录；请用 from_http_login(cookie=...) 提供已核实的 Cookie。"
+        )
 
     @classmethod
     def from_qrcode_login(
         cls,
-        *,
-        timeout: float = 300,
-        poll_interval: float = 2,
-        request_timeout: float = 20,
-        session=None,
+        **_kwargs,
     ) -> "BaijiaAuth":
-        """兼容旧入口；二维码仍由百家号官方登录页展示。"""
-        return cls.from_browser_login(
-            timeout=timeout,
-            poll_interval=poll_interval,
-            request_timeout=request_timeout,
-            session=session,
+        """二维码登录协议未核实，避免猜测回调或绕过验证码。"""
+        raise BaijiaLoginProtocolUnavailable(
+            "百家号二维码/短信登录的请求链路尚无可核实抓包证据；"
+            "请先在官方客户端完成登录，再把同源 Cookie 交给 from_http_login。"
         )
 
     @classmethod
@@ -240,7 +174,7 @@ class BaijiaAuth:
         return response
 
     def login_state(self) -> dict:
-        """查询 Creator 后台会话；无凭据时实测返回 ``errno=10001401``。"""
+        """查询 Creator 后台会话；无凭据时返回平台登录错误码。"""
         if not self.cookie:
             raise BaijiaAuthError("未配置 Cookie")
         return response_json(self.request("GET", APPINFO_URL, headers={"Referer": "https://baijiahao.baidu.com/"}))
@@ -249,7 +183,7 @@ class BaijiaAuth:
         return str(self.login_state().get("errno")) == "0"
 
     def require_logged_in(self) -> dict:
-        """只读验证浏览器 Cookie，返回账号信息或给出明确的失败码。"""
+        """只读验证 Cookie 会话，返回账号信息或给出明确的失败码。"""
         state = self.login_state()
         code = state.get("errno")
         if str(code) != "0":
@@ -263,7 +197,7 @@ class BaijiaAuth:
         response = self.request("HEAD", APPINFO_URL, headers={"token": self.creator_token})
         token = response.headers.get("token")
         if not token:
-            raise BaijiaAuthError("响应没有 Creator token；请在浏览器重新登录")
+            raise BaijiaAuthError("响应没有 Creator token；请重新取得 Creator token")
         self.creator_token = token
         return token
 

@@ -272,7 +272,16 @@ class BaijiaQRCodeLogin:
             ("_", str(now)),
         ]
         init_url = self._jsonp_url(PASSPORT_QR_INIT_URL, pairs)
-        response = self._request("GET", init_url)
+        response = self._request(
+            "GET",
+            init_url,
+            headers={
+                "Referer": "https://baijiahao.baidu.com/",
+                "Sec-Fetch-Dest": "script",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Site": "same-site",
+            },
+        )
         if not 200 <= response.status_code < 300:
             raise BaijiaAPIError(f"Passport 二维码初始化 HTTP {response.status_code}")
         data = self._parse_jsonp(response.text)
@@ -291,7 +300,13 @@ class BaijiaQRCodeLogin:
         image = self._request(
             "GET",
             image_url,
-            headers={"Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"},
+            headers={
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Referer": "https://baijiahao.baidu.com/",
+                "Sec-Fetch-Dest": "image",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Site": "same-site",
+            },
         )
         if not 200 <= image.status_code < 300:
             raise BaijiaAPIError(f"Passport 二维码图片 HTTP {image.status_code}")
@@ -326,7 +341,16 @@ class BaijiaQRCodeLogin:
             ("tt", str(now)),
             ("_", str(now)),
         ]
-        response = self._request("GET", self._jsonp_url(PASSPORT_QR_POLL_URL, pairs))
+        response = self._request(
+            "GET",
+            self._jsonp_url(PASSPORT_QR_POLL_URL, pairs),
+            headers={
+                "Referer": "https://baijiahao.baidu.com/",
+                "Sec-Fetch-Dest": "script",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Site": "same-site",
+            },
+        )
         if not 200 <= response.status_code < 300:
             raise BaijiaAPIError(f"Passport 二维码状态 HTTP {response.status_code}")
         data = self._parse_jsonp(response.text)
@@ -387,7 +411,16 @@ class BaijiaQRCodeLogin:
             ("callback", self.callback),
             ("_", str(now)),
         ]
-        response = self._request("GET", self._jsonp_url(PASSPORT_QR_LOGIN_URL, pairs))
+        response = self._request(
+            "GET",
+            self._jsonp_url(PASSPORT_QR_LOGIN_URL, pairs),
+            headers={
+                "Referer": "https://baijiahao.baidu.com/",
+                "Sec-Fetch-Dest": "script",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Site": "same-site",
+            },
+        )
         if not 200 <= response.status_code < 300:
             raise BaijiaAPIError(f"Passport QR 登录 HTTP {response.status_code}")
         data = self._parse_jsonp(response.text)

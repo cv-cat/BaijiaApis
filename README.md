@@ -9,6 +9,7 @@
 | Cookie 登录会话 | `BaijiaAuth.from_browser_login()`、`from_qrcode_login()`、`from_cookie()`、`require_logged_in()` | 当前 Chrome 使用手机号登录后，同源只读 GET `builder/app/appinfo` 已实测 HTTP 200、`errno=0` 且返回 `data.user`；当前会话 Cookie 在库的 `from_cookie().require_logged_in()` 也通过在线校验。独立 Playwright 新窗口登录流程尚未实测。 |
 | 本人网页作品列表 | `BaijiaCreatorAPI.list_web_works()` | 当前登录会话的 `GET pcui/article/lists` 已实测 HTTP 200、`errno=0`，无需伙伴 App Token；全部、图文、图文草稿视图与分页参数已核对。当前账号列表为空。库中独立 Cookie 请求尚未实测。 |
 | 网页图文草稿 | `BaijiaCreatorAPI.save_web_draft()`、`delete_web_draft()` | 当前 Chrome 官方编辑器已实测保存与删除临时草稿：均用 Cookie 与 Creator `token` 头；删除后草稿列表为空。库中独立 HTTP 调用尚未实测。 |
+| 网页图文公开发布 | `BaijiaCreatorAPI.publish_web_article()` | 请求字段依据公开 Creator 客户端的 `pcui/article/publish?callback=bjhpublish` 实现，已补齐请求契约和返回 URL 校验；**尚未在真实账号上点击或回放公开发布**，调用会创建线上作品。 |
 | 作者资料、动态、互动数据 | `BaijiaContentAPI.get_user_info/get_user_posts/get_item_metrics` | 公开作者主页已匿名 GET 实测；动态和互动沿用旧仓库的 `mbd.baidu.com/webpage` JSONP 契约，新增解析和请求契约测试，尚未用有效账号回放。 |
 | 公开文章 Item | `BaijiaContentAPI.get_article()` | 已对公开 `baijiahao.baidu.com/s?id=...` 页面做匿名 GET 实测，解析标题、作者、更新时间与正文；登录闭环中也用百家号 Cookie 读回首篇 2491 字正文。HTML 结构变化可能需要更新解析器。 |
 | 指定作者内容搜索 | `BaijiaSearchAPI.search_user_posts()` | 逐页读取作者动态，按文字在本地筛选。依赖上述动态接口。 |
@@ -208,10 +209,10 @@ api = BaiduApis()
 python -m unittest discover -s tests -v
 ```
 
-离线测试验证浏览器登录辅助与兼容别名的成功/超时/校验失败路径、本人网页作品列表和网页草稿的请求参数、Cookie 处理、登录态预检、跳转处理、请求 URL/参数/Body、JSONP 解析、分页游标、公开 Item 解析及发布/上传请求契约。测试会模拟浏览器，不启动真实 Chrome。当前 Chrome 手机号登录态、网页作品列表路由和一次草稿保存/删除已实测；独立 Playwright 登录、库内草稿 HTTP 调用、公开发布、上传和全站搜索尚未完成真实账号端到端验证。
+离线测试验证浏览器登录辅助与兼容别名的成功/超时/校验失败路径、本人网页作品列表和网页草稿的请求参数、Cookie 处理、登录态预检、跳转处理、请求 URL/参数/Body、JSONP 解析、分页游标、公开 Item 解析及发布/上传请求契约。测试会模拟浏览器，不启动真实 Chrome。当前 Chrome 手机号登录态、网页作品列表路由和一次草稿保存/删除已实测；独立 Playwright 登录、库内草稿 HTTP 调用、网页公开发布、上传和全站搜索尚未完成真实账号端到端验证。
 
 ## 端点依据
 
 - 旧仓库源码 `baidu_apis.py`：作者页、动态 JSONP、互动指标。
-- [公开 Creator 客户端原始源码](https://github.com/ai-chen2050/obsidian-wechat-public-platform/blob/master/src/api.ts)：Creator token 刷新、图片上传与网页后台发布字段。本文只实现其中图片上传。
+- [公开 Creator 客户端原始源码](https://github.com/ai-chen2050/obsidian-wechat-public-platform/blob/master/src/api.ts)：Creator token 刷新、图片上传与网页后台发布字段。网页发布方法按其中 `pcui/article/publish` 字段封装，但仍需真实账号单次受控验收。
 - [公开百家号 SDK](https://github.com/onlyliu1001/BaiJiaHaoSdk)：App ID / Token 图文发布与文章状态查询。开放接口路由已单独匿名探测，请求字段仍需账号核对。

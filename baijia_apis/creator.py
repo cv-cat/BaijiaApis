@@ -1,4 +1,4 @@
-"""百家号 Creator 网页只读列表、图片上传和图文开放接口。"""
+"""百家号 Creator 网页列表/发布、图片上传和图文开放接口。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from .auth import BaijiaAuth, BaijiaAPIError, BaijiaAuthError, BaijiaParseError,
 OPEN_BASE = "https://baijiahao.baidu.com/builderinner/open/resource"
 WEB_LIST_URL = "https://baijiahao.baidu.com/pcui/article/lists"
 WEB_SAVE_URL = "https://baijiahao.baidu.com/pcui/article/save"
+WEB_PUBLISH_URL = "https://baijiahao.baidu.com/pcui/article/publish"
 WEB_REMOVE_URL = "https://baijiahao.baidu.com/pcui/article/remove"
 UPLOAD_URL = "https://baijiahao.baidu.com/pcui/picture/uploadproxy"
 CREATOR_REFERER = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
@@ -179,6 +180,130 @@ class BaijiaCreatorAPI:
             raise BaijiaAPIError(
                 f"Web 草稿删除结果未确认：errno={result.get('errno')}；请先检查草稿列表，勿直接重试"
             )
+        return result
+
+    def publish_web_article(
+        self,
+        title: str,
+        content_html: str,
+        *,
+        cover_urls: Iterable[str],
+        author: str = "",
+        abstract: str = "",
+        activities: Iterable[tuple[str, bool]] = (),
+    ) -> dict:
+        """提交网页编辑器的图文公开发布请求。
+
+        该方法复现 Creator 编辑器已公开客户端观察到的
+        ``POST /pcui/article/publish?callback=bjhpublish`` 契约。它会创建
+        线上作品，不保存草稿，也不会自动重试。调用方应先确认标题、正文、
+        封面和账号发布权限；响应未返回作品 URL 时会抛出异常，调用方应先
+        在后台核对作品状态后再决定下一步。
+
+        ``activities`` 需要传入当前编辑器展示的活动 ID 与勾选状态。默认不
+        猜测活动 ID，避免使用已过期或不属于当前账号的活动配置。
+        """
+        self._require_web_editor()
+        title = title.strip()
+        if not 2 <= len(title) <= 64:
+            raise ValueError("发布标题需为 2–64 字")
+        if not content_html.strip():
+            raise ValueError("发布正文不能为空")
+        if "\r" in title or "\n" in title:
+            raise ValueError("发布标题不能包含换行符")
+        if any(ord(char) > 0xFFFF for char in title + content_html):
+            raise ValueError("emoji 等非 BMP 字符的网页长度规则尚未验证")
+        if not isinstance(author, str) or not isinstance(abstract, str):
+            raise ValueError("author 与 abstract 必须是字符串")
+        if any(char in author or char in abstract for char in "\r\n"):
+            raise ValueError("author 与 abstract 不能包含换行符")
+        if isinstance(cover_urls, (str, bytes)):
+            raise ValueError("cover_urls 应为 URL 列表")
+        covers = list(cover_urls)
+        if not 1 <= len(covers) <= 3:
+            raise ValueError("网页公开发布需传 1–3 张封面图")
+        for url in covers:
+            _valid_http_url(url, "cover_urls")
+
+        cover_images = [
+            {
+                "src": url,
+                "cropData": {"x": 0, "y": 0, "width": 2048, "height": 1365},
+                "machine_chooseimg": 0,
+                "isLegal": 1,
+            }
+            for url in covers
+        ]
+        fields = {
+            "type": "news",
+            "title": title,
+            "author": author,
+            "abstract": abstract,
+            "content": content_html,
+            "auto_mount_goods": "1",
+            "len": str(len(content_html)),
+            "vertical_cover": covers[0],
+            "cover_images": json.dumps(cover_images, ensure_ascii=False, separators=(",", ":")),
+            "_cover_images_map": json.dumps(
+                [{"src": url} for url in covers], ensure_ascii=False, separators=(",", ":")
+            ),
+            "source": "upload",
+            "cover_source": "upload",
+            "subtitle": "",
+            "bjhtopic_id": "",
+            "bjhtopic_info": "",
+            "clue": "1",
+            "bjhmt": "",
+            "order_id": "",
+            "aigc_rebuild": "",
+            "image_edit_point": (
+                '[{"img_type":"cover","img_num":{"template":0,"font":0,"filter":0,"paster":0,"cut":0,"any":0}},'
+                '{"img_type":"body","img_num":{"template":0,"font":0,"filter":0,"paster":0,"cut":0,"any":0}}]'
+            ),
+            "source_reprinted_allow": "0",
+            "abstract_from": "2",
+            "isBeautify": "false",
+            "usingImgFilter": "false",
+            "cover_layout": "one",
+        }
+        if isinstance(activities, (str, bytes)):
+            raise ValueError("activities 应为 (活动 ID, bool) 列表")
+        for index, activity in enumerate(activities):
+            try:
+                activity_id, checked = activity
+            except (TypeError, ValueError):
+                raise ValueError("每项活动应为 (活动 ID, bool)") from None
+            if not isinstance(activity_id, str) or not activity_id.strip() or any(
+                char in activity_id for char in "\r\n;="
+            ):
+                raise ValueError("活动 ID 格式无效")
+            if not isinstance(checked, bool):
+                raise ValueError("活动选中状态必须是 bool")
+            fields[f"activity_list[{index}][id]"] = activity_id
+            fields[f"activity_list[{index}][is_checked]"] = "1" if checked else "0"
+
+        response = self.auth.request(
+            "POST",
+            WEB_PUBLISH_URL,
+            params={"callback": "bjhpublish"},
+            data=fields,
+            headers={
+                "token": self.auth.creator_token,
+                "Referer": WEB_EDITOR_REFERER,
+                "Origin": "https://baijiahao.baidu.com",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        refreshed_token = response.headers.get("token")
+        if refreshed_token:
+            self.auth.creator_token = refreshed_token
+        result = response_json(response)
+        if str(result.get("errno")) != "0":
+            raise BaijiaAPIError(f"Web 图文发布失败：errno={result.get('errno')}")
+        ret = result.get("ret")
+        publish_url = ret.get("url") if isinstance(ret, dict) else None
+        if not isinstance(publish_url, str) or not publish_url.strip():
+            raise BaijiaParseError("网页发布响应缺少 ret.url；请先在后台核对作品状态，勿直接重试")
         return result
 
     def upload_image(self, path_or_bytes, *, filename: str | None = None) -> str:

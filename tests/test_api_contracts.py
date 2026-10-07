@@ -297,6 +297,75 @@ class CreatorTests(unittest.TestCase):
             BaijiaCreatorAPI(auth).delete_web_draft(123)
         self.assertEqual(len(session.calls), 1)
 
+    def test_web_publish_form_contract_and_token_rotation(self):
+        session = FakeSession(
+            FakeResponse(
+                data={"errno": 0, "ret": {"url": "https://baijiahao.baidu.com/s?id=123"}},
+                headers={"token": "rotated-token"},
+            )
+        )
+        auth = BaijiaAuth.from_cookie("BAIDUID=mine", creator_token="creator-token", session=session)
+        result = BaijiaCreatorAPI(auth).publish_web_article(
+            "测试发布标题", "<p>测试发布正文</p>",
+            cover_urls=["https://pic.example/cover.jpg"],
+            author="测试作者", abstract="测试摘要",
+            activities=[("ttv", True), ("reward", False)],
+        )
+        self.assertEqual(result["ret"]["url"], "https://baijiahao.baidu.com/s?id=123")
+        self.assertEqual(auth.creator_token, "rotated-token")
+        method, url, kwargs = session.calls[0]
+        self.assertEqual((method, url), ("POST", "https://baijiahao.baidu.com/pcui/article/publish"))
+        self.assertEqual(kwargs["params"], {"callback": "bjhpublish"})
+        self.assertEqual(kwargs["headers"]["Cookie"], "BAIDUID=mine")
+        self.assertEqual(kwargs["headers"]["token"], "creator-token")
+        self.assertEqual(kwargs["headers"]["Referer"], "https://baijiahao.baidu.com/builder/rc/edit?type=news&is_from_cms=1")
+        self.assertIs(kwargs["allow_redirects"], False)
+        fields = kwargs["data"]
+        self.assertEqual(fields["type"], "news")
+        self.assertEqual(fields["len"], str(len("<p>测试发布正文</p>")))
+        self.assertEqual(fields["vertical_cover"], "https://pic.example/cover.jpg")
+        self.assertEqual(json.loads(fields["_cover_images_map"]), [{"src": "https://pic.example/cover.jpg"}])
+        self.assertEqual(json.loads(fields["cover_images"])[0]["src"], "https://pic.example/cover.jpg")
+        self.assertEqual(fields["activity_list[0][id]"], "ttv")
+        self.assertEqual(fields["activity_list[0][is_checked]"], "1")
+        self.assertEqual(fields["activity_list[1][is_checked]"], "0")
+
+    def test_web_publish_requires_cover_and_reconciles_ambiguous_success(self):
+        session = FakeSession(FakeResponse(data={"errno": 0, "ret": {}}))
+        auth = BaijiaAuth.from_cookie("BAIDUID=mine", creator_token="creator-token", session=session)
+        api = BaijiaCreatorAPI(auth)
+        with self.assertRaises(ValueError):
+            api.publish_web_article("测试发布标题", "<p>正文</p>", cover_urls=[])
+        self.assertEqual(session.calls, [])
+        with self.assertRaisesRegex(BaijiaParseError, "勿直接重试"):
+            api.publish_web_article(
+                "测试发布标题", "<p>正文</p>", cover_urls=["https://pic.example/cover.jpg"]
+            )
+        self.assertEqual(len(session.calls), 1)
+
+    def test_web_publish_requires_web_auth_and_validates_inputs(self):
+        empty = BaijiaCreatorAPI(BaijiaAuth(session=FakeSession()))
+        with self.assertRaises(BaijiaAuthError):
+            empty.publish_web_article("测试发布标题", "<p>正文</p>", cover_urls=["https://pic.example/a.jpg"])
+        session = FakeSession()
+        auth = BaijiaAuth.from_cookie("BAIDUID=mine", creator_token="creator-token", session=session)
+        api = BaijiaCreatorAPI(auth)
+        for title, body, covers in (
+            ("短", "<p>正文</p>", ["https://pic.example/a.jpg"]),
+            ("测试发布标题", "", ["https://pic.example/a.jpg"]),
+            ("测试发布标题", "<p>🙂</p>", ["https://pic.example/a.jpg"]),
+            ("测试发布标题", "<p>正文</p>", ["ftp://pic.example/a.jpg"]),
+        ):
+            with self.subTest(title=title, body=body), self.assertRaises(ValueError):
+                api.publish_web_article(title, body, cover_urls=covers)
+        with self.assertRaises(ValueError):
+            api.publish_web_article("测试发布标题", "<p>正文</p>", cover_urls="https://pic.example/a.jpg")
+        with self.assertRaises(ValueError):
+            api.publish_web_article(
+                "测试发布标题", "<p>正文</p>", cover_urls=["https://pic.example/a.jpg"], activities=[("x", "yes")]
+            )
+        self.assertEqual(session.calls, [])
+
     def test_partner_publish_body_and_status_contract(self):
         session = FakeSession(
             FakeResponse(data={"errno": 0, "data": {"article_id": "123"}}),

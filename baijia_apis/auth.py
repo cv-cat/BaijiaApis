@@ -755,7 +755,22 @@ class BaijiaAuth:
             raise BaijiaAuthError("需要 App ID 和 App Token")
         return cls(app_id=app_id, app_token=app_token, **kwargs)
 
-    def request(self, method: str, url: str, *, headers=None, use_cookie: bool = True, **kwargs):
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers=None,
+        use_cookie: bool = True,
+        allow_redirect_response: bool = False,
+        **kwargs,
+    ):
+        """发送百度 HTTPS 请求并按调用方选择处理重定向响应。
+
+        默认仍将非 2xx 响应视为接口错误。公开搜索在关闭重定向时需要
+        读取 3xx 的目标来识别百度安全验证，因此可显式开启
+        ``allow_redirect_response``；它只返回原始 3xx，不会自动访问目标。
+        """
         parsed = urlparse(url)
         hostname = (parsed.hostname or "").lower()
         if parsed.scheme != "https" or not (hostname == "baidu.com" or hostname.endswith(".baidu.com")):
@@ -778,6 +793,8 @@ class BaijiaAuth:
         response = self.session.request(method.upper(), url, headers=request_headers, **kwargs)
         self._absorb_response_auth(response)
         if not 200 <= response.status_code < 300:
+            if allow_redirect_response and 300 <= response.status_code < 400:
+                return response
             raise BaijiaAPIError(f"HTTP {response.status_code}: {parsed.path}")
         return response
 

@@ -191,6 +191,18 @@ class SearchTests(unittest.TestCase):
         self.assertEqual((method, url), ("GET", "https://www.baidu.com/s"))
         self.assertEqual(kwargs["params"], {"wd": "site:baijiahao.baidu.com AI", "pn": 10})
 
+    def test_site_search_redirect_to_captcha_is_reported_as_blocked(self):
+        session = FakeSession(
+            FakeResponse(
+                status_code=302,
+                headers={"Location": "https://wappass.baidu.com/static/captcha/tuxing_v2.html"},
+            )
+        )
+        api = BaijiaSearchAPI(BaijiaAuth(session=session))
+        with self.assertRaises(BaijiaSearchBlocked):
+            api.search_articles("AI")
+        self.assertIs(session.calls[0][2]["allow_redirects"], False)
+
     def test_site_search_reads_baidu_result_mu_and_title(self):
         html = (
             '<div class="result" mu="https://baijiahao.baidu.com/s?id=123&wfr=spider">'

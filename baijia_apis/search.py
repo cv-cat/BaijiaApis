@@ -109,8 +109,10 @@ class BaijiaSearchAPI:
         response = self.auth.request(
             "GET", SEARCH_URL, use_cookie=False,
             params={"wd": f"site:baijiahao.baidu.com {query}", "pn": (page - 1) * 10},
-            headers=headers, allow_redirects=False,
+            headers=headers, allow_redirects=False, allow_redirect_response=True,
         )
+        if 300 <= response.status_code < 400:
+            raise BaijiaSearchBlocked("百度搜索跳转到安全验证页，需要人工完成验证")
         html = response.text
         if "百度安全验证" in html or "安全验证" in html or "captcha" in html.lower():
             raise BaijiaSearchBlocked("百度搜索要求人工完成安全验证")

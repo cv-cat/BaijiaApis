@@ -41,9 +41,11 @@ with BaijiaAuth.from_http_login(
     creator_token=os.environ.get("BAIJIA_CREATOR_TOKEN", ""),
 ) as auth:
     account = auth.require_logged_in()
-    article = BaijiaContentAPI(auth).get_article("1839669810600928968")
+    article = BaijiaContentAPI(auth).get_article("1846590256268472121")
     print(account["data"], article["title"])
 ```
+
+固定示例 ID 若反复请求可能被百度安全验证拦截（返回验证页并抛 `BaijiaParseError`）；建议改用搜索结果的动态 ID：`BaijiaSearchAPI(auth).search_articles("关键词")["items"][0]["id"]` 再交给 `get_article()`。
 
 `from_http_login()` 只做一次 `GET https://baijiahao.baidu.com/builder/app/appinfo` 校验；`errno` 不是 `0` 时抛 `BaijiaAuthError`。Cookie 必须包含该请求真正需要的 HttpOnly 字段；`document.cookie` 的值可能不完整。`BaijiaAuth.request()` 限制在 HTTPS 百度域名，带 Cookie 或写请求默认不跟随重定向。
 

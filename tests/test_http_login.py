@@ -135,12 +135,13 @@ class HttpLoginTests(unittest.TestCase):
                 "sign": "S",
             })),
             FakeResponse(None, content=b"PNG", headers={"content-type": "image/png"}),
+            # 2026-10-24 真实抓包：确认事件 errno=0 且 channel_v 带 v 票据
             FakeResponse(text=jsonp({"errno": 0, "status": 0, "channel_v": {"v": "BDUSS", "u": "u name"}})),
             FakeResponse(text=jsonp({"errInfo": {"no": "0"}, "url": "https://baijiahao.baidu.com/"})),
         )
         login = BaijiaQRCodeLogin(session=session, bootstrap=False)
         login.start()
-        self.assertEqual(login.poll().state, "scanned")
+        self.assertEqual(login.poll().state, "approved")
         redirect = login.complete()
         self.assertEqual(redirect, "https://baijiahao.baidu.com/")
         method, url, kwargs = session.calls[3]
@@ -150,6 +151,29 @@ class HttpLoginTests(unittest.TestCase):
         self.assertEqual(keys, ["v", "bduss", "u", "loginVersion", "qrcode", "tpl", "callback", "_"])
         self.assertIn("bduss=BDUSS", url)
         self.assertIn("u=u%2520name", url)
+
+    def test_qrcode_poll_two_stage_scan_then_confirm(self):
+        session = FakeSession(
+            FakeResponse(text=jsonp({
+                "imgurl": "https://passport.baidu.com/v2/api/qrcode?sign=S",
+                "errno": 0,
+                "sign": "S",
+            })),
+            FakeResponse(None, content=b"PNG", headers={"content-type": "image/png"}),
+            # 空轮询：服务端 hold ~30s 后只回 errno=1
+            FakeResponse(text=jsonp({"errno": 1})),
+            # 手机已扫码未确认：status=1，channel_v 无 v
+            FakeResponse(text=jsonp({"errno": 0, "channel_v": {"status": 1}})),
+        )
+        login = BaijiaQRCodeLogin(session=session, bootstrap=False)
+        login.start()
+        waiting = login.poll()
+        self.assertEqual((waiting.state, waiting.errno), ("waiting", 1))
+        scanned = login.poll()
+        self.assertEqual(scanned.state, "scanned")
+        # 尚未确认时 complete() 必须拒绝
+        with self.assertRaisesRegex(BaijiaAuthError, "尚未确认"):
+            login.complete()
 
     def test_cookie_parser_still_requires_material(self):
         with self.assertRaises(BaijiaAuthError):

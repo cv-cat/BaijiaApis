@@ -387,6 +387,9 @@ class BaijiaQRCodeLogin:
                 "Sec-Fetch-Mode": "no-cors",
                 "Sec-Fetch-Site": "same-site",
             },
+            # channel/unicast 服务端 hold 约 30s 才回 {"errno":1} 空结果
+            # （2026-10-24 真实抓包），默认 20s 会在空轮询上必然剪断。
+            timeout=max(self.timeout, 35.0),
         )
         if not 200 <= response.status_code < 300:
             raise BaijiaAPIError(f"Passport 二维码状态 HTTP {response.status_code}")
@@ -405,14 +408,18 @@ class BaijiaQRCodeLogin:
         if isinstance(channel, dict):
             self._channel_v = dict(channel)
         channel_status = str(data.get("status") or data.get("channel_status") or "")
-        if channel_status == "0" and self._channel_v:
-            state = "scanned"
-        elif errno == 1:
+        # 2026-10-24 真实抓包（continue_20261023）：空轮询 {"errno":1}；
+        # 手机扫码 {"errno":0,"channel_v":{"status":1}}（无 v）；
+        # 手机确认 {"errno":0,"channel_v":{"status":0,"v":"<一次性票据>","u":""}}。
+        token = str(self._channel_v.get("v") or "") if self._channel_v else ""
+        if errno == 1:
             state = "waiting"
-        elif errno == 0:
-            state = "scanned" if self._channel_v else "approved"
         elif errno in {2, 3}:
             state = "expired"
+        elif errno == 0 and token:
+            state = "approved"
+        elif errno == 0:
+            state = "scanned" if self._channel_v else "waiting"
         else:
             state = "challenge"
         result = BaijiaQRCodePoll(
@@ -431,7 +438,9 @@ class BaijiaQRCodeLogin:
         if not self._started:
             raise BaijiaAuthError("请先调用 BaijiaQRCodeLogin.start() 获取二维码")
         current = self._last_poll or self.poll()
-        if current.state not in {"scanned", "approved"} or not self._channel_v:
+        # 只有手机确认后的 approved 状态才带一次性 v 票据；仅扫码未确认时
+        # channel_v 无 v（2026-10-24 真实抓包）。
+        if current.state != "approved" or not self._channel_v:
             raise BaijiaAuthError(f"二维码尚未确认：errno={current.errno}")
         bduss = str(self._channel_v.get("v") or "")
         user = str(self._channel_v.get("u") or "")

@@ -9,6 +9,7 @@ from typing import Iterable
 from urllib.parse import urlparse
 
 from .auth import BaijiaAuth, BaijiaAPIError, BaijiaAuthError, BaijiaParseError, response_json
+from curl_cffi import CurlMime
 
 
 OPEN_BASE = "https://baijiahao.baidu.com/builderinner/open/resource"
@@ -191,6 +192,7 @@ class BaijiaCreatorAPI:
         author: str = "",
         abstract: str = "",
         activities: Iterable[tuple[str, bool]] = (),
+        cover_crop: tuple[int, int] = (2048, 1365),
     ) -> dict:
         """提交网页编辑器的图文公开发布请求。
 
@@ -228,7 +230,7 @@ class BaijiaCreatorAPI:
         cover_images = [
             {
                 "src": url,
-                "cropData": {"x": 0, "y": 0, "width": 2048, "height": 1365},
+                "cropData": {"x": 0, "y": 0, "width": cover_crop[0], "height": cover_crop[1]},
                 "machine_chooseimg": 0,
                 "isLegal": 1,
             }
@@ -311,7 +313,7 @@ class BaijiaCreatorAPI:
 
         表单字段依据公开客户端源码，路由可达；真实账号响应尚未验证。
         """
-        self._require_creator()
+        self._require_web_editor()
         if isinstance(path_or_bytes, (str, Path)):
             path = Path(path_or_bytes)
             data = path.read_bytes()
@@ -328,7 +330,10 @@ class BaijiaCreatorAPI:
         if "\r" in name or "\n" in name:
             raise ValueError("文件名不能包含换行符")
         name = (Path(name).stem or "image") + suffix
-        fields = {
+        # 2026-10-25 实测：uploadproxy 由网页 Cookie + Creator token 鉴权，
+        # app_id 可为空串；curl_cffi 需要 CurlMime 而不是 files=。
+        multipart = CurlMime()
+        for key, value in {
             "type": "image",
             "app_id": self.auth.app_id,
             "is_waterlog": "1",
@@ -336,9 +341,11 @@ class BaijiaCreatorAPI:
             "no_compress": "0",
             "is_events": "",
             "article_type": "news",
-        }
+        }.items():
+            multipart.addpart(name=key, data=value)
+        multipart.addpart(name="media", filename=name, content_type=mime, data=data)
         response = self.auth.request(
-            "POST", UPLOAD_URL, data=fields, files={"media": (name, data, mime)},
+            "POST", UPLOAD_URL, multipart=multipart,
             headers={"token": self.auth.creator_token, "Referer": CREATOR_REFERER},
         )
         payload = response_json(response)

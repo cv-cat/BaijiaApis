@@ -503,13 +503,16 @@ class CreatorTests(unittest.TestCase):
 
     def test_creator_upload_is_multipart_and_returns_https_url(self):
         session = FakeSession(FakeResponse(data={"errno": 0, "ret": {"https_url": "https://pic.example/a.png"}}))
-        auth = BaijiaAuth.from_cookie("BAIDUID=x", creator_token="jwt", app_id="app-id", session=session)
+        # 2026-10-25 实测：uploadproxy 由网页 Cookie + Creator token 鉴权，App ID 可缺省
+        auth = BaijiaAuth.from_cookie("BAIDUID=x", creator_token="jwt", session=session)
         url = BaijiaCreatorAPI(auth).upload_image(b"\x89PNG\r\n\x1a\nbody", filename="cover.png")
         self.assertEqual(url, "https://pic.example/a.png")
         method, endpoint, kwargs = session.calls[0]
         self.assertEqual((method, endpoint), ("POST", "https://baijiahao.baidu.com/pcui/picture/uploadproxy"))
-        self.assertEqual(kwargs["data"]["article_type"], "news")
-        self.assertEqual(kwargs["files"]["media"][2], "image/png")
+        # curl_cffi 需要 CurlMime 而不是 files=
+        from curl_cffi import CurlMime as _CurlMime
+
+        self.assertIsInstance(kwargs["multipart"], _CurlMime)
         self.assertEqual(kwargs["headers"]["token"], "jwt")
 
 

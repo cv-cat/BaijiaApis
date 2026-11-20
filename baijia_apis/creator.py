@@ -18,9 +18,13 @@ WEB_SAVE_URL = "https://baijiahao.baidu.com/pcui/article/save"
 WEB_PUBLISH_URL = "https://baijiahao.baidu.com/pcui/article/publish"
 WEB_REMOVE_URL = "https://baijiahao.baidu.com/pcui/article/remove"
 UPLOAD_URL = "https://baijiahao.baidu.com/pcui/picture/uploadproxy"
+MESSAGE_UNREAD_URL = "https://baijiahao.baidu.com/pcui/message/getUnreadNum"
+MESSAGE_LIST_URL = "https://baijiahao.baidu.com/pcui/message/getMessageList"
+COMMENT_MESSAGE_URL = "https://baijiahao.baidu.com/pcui/comment/message"
 CREATOR_REFERER = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
 WEB_EDITOR_REFERER = "https://baijiahao.baidu.com/builder/rc/edit?type=news&is_from_cms=1"
 CONTENT_REFERER = "https://baijiahao.baidu.com/builder/rc/content"
+MESSAGE_REFERER = "https://baijiahao.baidu.com/builder/rc/message"
 
 
 def _valid_http_url(value: str, label: str) -> str:
@@ -433,4 +437,69 @@ class BaijiaCreatorAPI:
         result = response_json(response)
         if result.get("errno") not in (0, "0"):
             raise BaijiaAPIError(f"状态查询失败：errno={result.get('errno')}，{result.get('errmsg', '')}")
+        return result
+
+    # ---- 消息中心（2026-11-20 实测：未读数/通知公告列表/评论消息） ----
+
+    def _require_message_center(self) -> None:
+        if not self.auth.cookie or not self.auth.creator_token:
+            raise BaijiaAuthError("消息中心需要 Cookie 和 Creator token")
+
+    def unread_message_counts(self) -> dict:
+        """读取消息中心各分类未读数（/pcui/message/getUnreadNum）。
+
+        返回原始 JSON；``data`` 内是分类 → 未读数的映射。
+        """
+        self._require_message_center()
+        response = self.auth.request(
+            "GET", MESSAGE_UNREAD_URL,
+            headers={"Referer": MESSAGE_REFERER, "Accept": "application/json"},
+        )
+        result = response_json(response)
+        if str(result.get("errno")) != "0":
+            raise BaijiaAPIError(f"未读数读取失败：errno={result.get('errno')}")
+        if not isinstance(result.get("data"), dict):
+            raise BaijiaParseError("getUnreadNum 缺少 data 对象")
+        return result
+
+    def list_messages(self, *, page: int = 1, page_size: int = 20, category: str = "notice") -> dict:
+        """分页读取通知/公告消息（/pcui/message/getMessageList）。
+
+        category 仅支持页面已核对的 ``notice`` 与 ``announce``。
+        """
+        self._require_message_center()
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            raise ValueError("page 必须是从 1 开始的整数")
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
+            raise ValueError("page_size 必须在 1–100")
+        if category not in ("notice", "announce"):
+            raise ValueError("category 仅支持 notice、announce")
+        response = self.auth.request(
+            "GET", MESSAGE_LIST_URL,
+            params={"currentPage": page, "pageSize": page_size, "cat": category},
+            headers={"Referer": MESSAGE_REFERER, "Accept": "application/json"},
+        )
+        result = response_json(response)
+        if str(result.get("errno")) != "0":
+            raise BaijiaAPIError(f"消息列表读取失败：errno={result.get('errno')}")
+        data = result.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("list"), list):
+            raise BaijiaParseError("getMessageList 缺少 data.list")
+        return result
+
+    def list_comment_messages(self, *, page: int = 1, page_size: int = 20) -> dict:
+        """分页读取文章评论消息（/pcui/comment/message）。"""
+        self._require_message_center()
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            raise ValueError("page 必须是从 1 开始的整数")
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 100:
+            raise ValueError("page_size 必须在 1–100")
+        response = self.auth.request(
+            "GET", COMMENT_MESSAGE_URL,
+            params={"currentPage": page, "pageSize": page_size},
+            headers={"Referer": MESSAGE_REFERER, "Accept": "application/json"},
+        )
+        result = response_json(response)
+        if str(result.get("errno")) != "0":
+            raise BaijiaAPIError(f"评论消息读取失败：errno={result.get('errno')}")
         return result
